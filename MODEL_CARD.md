@@ -2,17 +2,17 @@
 
 ## Model details
 
-| | |
-| --- | --- |
-| **Name** | transit-exoplanet-ml candidate screener |
-| **Version** | 0.1.0 (feature schema version 1) |
-| **Type** | Stacked binary classifier |
+|                   |                                                                                  |
+| ----------------- | -------------------------------------------------------------------------------- |
+| **Name**          | transit-exoplanet-ml candidate screener                                          |
+| **Version**       | 0.1.0 (feature schema version 1)                                                 |
+| **Type**          | Stacked binary classifier                                                        |
 | **Base learners** | LightGBM, ExtraTrees (500 trees), RBF SVM (Platt-scaled), L2 logistic regression |
-| **Meta-learner** | L2 logistic regression, `C = 0.1`, fixed and never tuned |
-| **Meta inputs** | the four base probabilities, and nothing else |
-| **Output** | `potential_probability` ∈ [0, 1] and a `POTENTIAL` / `UNLIKELY` decision |
-| **Seed** | 42 |
-| **License** | see `LICENSE` |
+| **Meta-learner**  | L2 logistic regression, `C = 0.1`, fixed and never tuned                         |
+| **Meta inputs**   | the four base probabilities, and nothing else                                    |
+| **Output**        | `potential_probability` ∈ [0, 1] and a `POTENTIAL` / `UNLIKELY` decision         |
+| **Seed**          | 42                                                                               |
+| **License**       | see `LICENSE`                                                                    |
 
 The production model is **always** this stack. If a single base learner or the
 unweighted probability-average baseline scores higher, the stack still ships and
@@ -36,7 +36,7 @@ replace vetting, follow-up observation, or peer review.
 - Confirming or refuting a planet.
 - Raw light-curve processing, CNNs on pixel or flux time series, and data downloading — none are part of this project.
 - Online or low-latency serving; this is a batch tool.
-- Stars or instruments unlike those in the training set (see *Limitations*).
+- Stars or instruments unlike those in the training set (see _Limitations_).
 
 ## Training data
 
@@ -46,7 +46,7 @@ star, named `<star-name>_<YYYYMMDD>.csv`. Each row is one candidate.
 Two independent axes are used:
 
 - **`candidate_label`** — the target: `CONFIRMED → 1`, `FALSE-POSITIVE → 0`.
-- **`detection_status`** — whether the detection pipeline *accepted* the
+- **`detection_status`** — whether the detection pipeline _accepted_ the
   candidate (`accepted`) or not (`rejected`, `provisional`, `harmonic_duplicate`).
 
 Rejected candidates train the base learners, which is where their signal is
@@ -122,13 +122,13 @@ Run `20260824T150116Z-4ad52e7f`, seed 42, schema version 1.
 
 ### Training set
 
-| | |
-| --- | --- |
-| Stars | 35 |
-| Candidates | 228 |
-| Accepted candidates | 87 (67 CONFIRMED / 20 FALSE-POSITIVE) |
-| Non-accepted candidates | 141 (base-learner training only) |
-| Model features | 36 |
+|                         |                                       |
+| ----------------------- | ------------------------------------- |
+| Stars                   | 35                                    |
+| Candidates              | 228                                   |
+| Accepted candidates     | 87 (67 CONFIRMED / 20 FALSE-POSITIVE) |
+| Non-accepted candidates | 141 (base-learner training only)      |
+| Model features          | 36                                    |
 
 Accepted candidates are **77% CONFIRMED**. That is the precision a "flag everything" rule would achieve at 100 % recall, and it is the number every precision below should be read against.
 
@@ -136,14 +136,14 @@ Accepted candidates are **77% CONFIRMED**. That is the precision a "flag everyth
 
 5 outer folds, inner folds [3, 3, 3, 3, 3], grouped by star. Each fold picked its own threshold from its outer-training predictions only. Intervals are percentile 95 % CIs from 1000 star-level bootstrap resamples.
 
-| Model | Precision | 95 % CI | Recall | 95 % CI | F2 | AP | 95 % CI | ROC-AUC | Brier | Log loss |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **Stack (production)** | 0.829 | 0.697 – 0.932 | 1.000 | 1.000 – 1.000 | 0.960 | 0.885 | 0.748 – 0.979 | 0.659 | 0.153 | 0.480 |
-| LightGBM | 0.840 | 0.701 – 0.949 | 0.933 | 0.842 – 1.000 | 0.913 | 0.887 | 0.730 – 0.990 | 0.719 | 0.169 | 0.584 |
-| ExtraTrees | 0.829 | 0.693 – 0.937 | 0.933 | 0.842 – 1.000 | 0.911 | 0.864 | 0.719 – 0.982 | 0.654 | 0.220 | 0.636 |
-| RBF SVM | 0.816 | 0.682 – 0.914 | 0.962 | 0.917 – 1.000 | 0.929 | 0.891 | 0.785 – 0.963 | 0.654 | 0.307 | 0.827 |
-| Logistic regression | 0.796 | 0.667 – 0.901 | 0.935 | 0.837 – 1.000 | 0.904 | 0.793 | 0.642 – 0.973 | 0.571 | 0.262 | 2.494 |
-| Probability average (baseline) | 0.842 | 0.713 – 0.944 | 0.922 | 0.806 – 1.000 | 0.905 | 0.915 | 0.800 – 0.985 | 0.746 | 0.182 | 0.541 |
+| Model                          | Precision | 95 % CI       | Recall | 95 % CI       | F2    | AP    | 95 % CI       | ROC-AUC | Brier | Log loss |
+| ------------------------------ | --------- | ------------- | ------ | ------------- | ----- | ----- | ------------- | ------- | ----- | -------- |
+| **Stack (production)**         | 0.829     | 0.697 – 0.932 | 1.000  | 1.000 – 1.000 | 0.960 | 0.885 | 0.748 – 0.979 | 0.659   | 0.153 | 0.480    |
+| LightGBM                       | 0.840     | 0.701 – 0.949 | 0.933  | 0.842 – 1.000 | 0.913 | 0.887 | 0.730 – 0.990 | 0.719   | 0.169 | 0.584    |
+| ExtraTrees                     | 0.829     | 0.693 – 0.937 | 0.933  | 0.842 – 1.000 | 0.911 | 0.864 | 0.719 – 0.982 | 0.654   | 0.220 | 0.636    |
+| RBF SVM                        | 0.816     | 0.682 – 0.914 | 0.962  | 0.917 – 1.000 | 0.929 | 0.891 | 0.785 – 0.963 | 0.654   | 0.307 | 0.827    |
+| Logistic regression            | 0.796     | 0.667 – 0.901 | 0.935  | 0.837 – 1.000 | 0.904 | 0.793 | 0.642 – 0.973 | 0.571   | 0.262 | 2.494    |
+| Probability average (baseline) | 0.842     | 0.713 – 0.944 | 0.922  | 0.806 – 1.000 | 0.905 | 0.915 | 0.800 – 0.985 | 0.746   | 0.182 | 0.541    |
 
 Pooled held-out confusion matrix for the stack: 67 true positives, 17 false positives, 0 false negatives, 3 true negatives.
 
@@ -158,14 +158,14 @@ The practical reading: the stack is the safer choice at the high-recall operatin
 
 ### Saved operating point
 
-| | |
-| --- | --- |
-| Threshold | 0.707237 |
-| Recall floor | 95% |
-| Floor met on cross-fitted training rows | yes |
-| Cross-fitted precision | 0.810 |
-| Cross-fitted recall | 1.000 |
-| Cross-fitted average precision | 0.888 |
+|                                         |          |
+| --------------------------------------- | -------- |
+| Threshold                               | 0.707237 |
+| Recall floor                            | 95%      |
+| Floor met on cross-fitted training rows | yes      |
+| Cross-fitted precision                  | 0.810    |
+| Cross-fitted recall                     | 1.000    |
+| Cross-fitted average precision          | 0.888    |
 
 The threshold is fitted on training stars. Pooled held-out recall for the stack was 1.000 (CI 1.000 – 1.000).
 
@@ -173,18 +173,18 @@ The threshold is fitted on training stars. Pooled held-out recall for the stack 
 
 Permutation importance on held-out outer-fold stars, as the drop in accepted-candidate average precision; mean over folds and repeats, ± the standard deviation of the per-fold means.
 
-| Feature | Importance | ± |
-| --- | --- | --- |
-| `MES` | 0.0178 | 0.0296 |
-| `planet_radius_rearth` | 0.0140 | 0.0203 |
-| `period_days` | 0.0104 | 0.0140 |
-| `vshape_metric` | 0.0094 | 0.0322 |
-| `skewness_flux` | 0.0086 | 0.0072 |
-| `max_mes` | 0.0076 | 0.0102 |
-| `SES_mean` | 0.0066 | 0.0083 |
-| `acf_lag_3h` | 0.0058 | 0.0092 |
-| `acf_lag_12h` | 0.0058 | 0.0058 |
-| `secondary_depth_snr` | 0.0054 | 0.0076 |
+| Feature                | Importance | ±      |
+| ---------------------- | ---------- | ------ |
+| `MES`                  | 0.0178     | 0.0296 |
+| `planet_radius_rearth` | 0.0140     | 0.0203 |
+| `period_days`          | 0.0104     | 0.0140 |
+| `vshape_metric`        | 0.0094     | 0.0322 |
+| `skewness_flux`        | 0.0086     | 0.0072 |
+| `max_mes`              | 0.0076     | 0.0102 |
+| `SES_mean`             | 0.0066     | 0.0083 |
+| `acf_lag_3h`           | 0.0058     | 0.0092 |
+| `acf_lag_12h`          | 0.0058     | 0.0058 |
+| `secondary_depth_snr`  | 0.0054     | 0.0076 |
 
 For most features the fold-to-fold spread exceeds the mean, so **no single
 feature is robustly important** across held-out stars. Read this table as a weak
@@ -216,7 +216,7 @@ Plots for calibration, precision-recall, ROC, score separation, permutation impo
 - **Acceptance coupling.** The threshold and the meta-model are calibrated on
   accepted candidates only. Applying the score to candidates the detection
   pipeline rejected extrapolates outside the calibration set.
-- **Pipeline dependence.** Features are computed by a specific upstream
+- **Pipeline dependence.** Features are computed by the [ltp-features](https://github.com/rachzy/ltp-features)
   detection pipeline. Feeding features produced by a different pipeline, or with
   different settings, invalidates the calibration even when the column names
   match.
@@ -228,7 +228,7 @@ Plots for calibration, precision-recall, ROC, score separation, permutation impo
   candidate would already reach 100 % recall at a precision equal to the base
   rate. Forcing 95 % recall on top of that leaves the model only a handful of
   false positives it can afford to exclude. Read the precision figures against
-  the base rate stated in *Results*, never as absolute skill, and treat the gap
+  the base rate stated in _Results_, never as absolute skill, and treat the gap
   between the two as the model's actual contribution.
 - **Few negative examples to learn the boundary from.** The meta-model and the
   threshold are fitted on accepted candidates only, of which the `FALSE-POSITIVE`
