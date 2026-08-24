@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "transit-exoplanet-ml"
+version = "0.1.0"
+description = "Star-grouped stacked classifier for screening transit exoplanet candidates"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11,<3.15"
+dependencies = [
+    "typer>=0.15",
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "scipy>=1.13",
+    "scikit-learn>=1.5",
+    "lightgbm>=4.5",
+    "joblib>=1.4",
+    "pyyaml>=6.0",
+    "matplotlib>=3.9",
+]
+
+[project.scripts]
+exoplanet-ml = "src.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "coverage>=7.6",
+    "ruff>=0.8",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["B905"]
+
+[tool.pytest.ini_options]
+testpaths = ["src/tests"]
+pythonpath = ["."]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["src/tests/*"]
+branch = true

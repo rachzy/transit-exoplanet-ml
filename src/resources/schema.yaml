@@ -1,0 +1,95 @@
+# Versioned strict feature schema for transit exoplanet candidate screening.
+#
+# Bump `schema_version` whenever `feature_columns` or `known_columns` change.
+# Model bundles record the schema version they were trained with and refuse to
+# load against an incompatible one.
+schema_version: 1
+
+target_column: candidate_label
+status_column: detection_status
+
+# candidate_label -> binary target
+label_mapping:
+  CONFIRMED: 1
+  FALSE-POSITIVE: 0
+
+# detection_status allowlist; anything else is rejected at validation time.
+valid_statuses:
+  - accepted
+  - rejected
+  - provisional
+  - harmonic_duplicate
+
+# Only rows with this status train the meta-model and determine the threshold.
+accepted_status: accepted
+
+# Strict allowlist: exactly these columns reach a model.
+feature_columns:
+  - period_days
+  - duration_hours
+  - scale_mean
+  - scale_std
+  - local_noise
+  - depth_stability
+  - acf_lag_1h
+  - acf_lag_3h
+  - acf_lag_6h
+  - acf_lag_12h
+  - acf_lag_24h
+  - cadence_hours
+  - depth_mean_per_transit
+  - depth_std_per_transit
+  - npts_transit_median
+  - cdpp_3h
+  - cdpp_6h
+  - cdpp_12h
+  - SES_mean
+  - SES_std
+  - MES
+  - max_ses
+  - max_mes
+  - snr_global
+  - resid_rms_global
+  - vshape_metric
+  - secondary_depth
+  - secondary_depth_snr
+  - secondary_depth_snr_log
+  - secondary_depth_snr_capped
+  - odd_even_depth_ratio
+  - ingress_egress_asymmetry
+  - skewness_flux
+  - kurtosis_flux
+  - outlier_resistance
+  - planet_radius_rearth
+
+# Columns that are present in the processed CSVs but deliberately withheld from
+# every model. Grouped by the reason they are excluded.
+excluded_columns:
+  supervision:
+    - candidate_label
+    - detection_status
+    - matched_target
+    - matched_period_ratio
+  pipeline_control:
+    - mes_threshold_used
+    - is_provisional_detection
+  non_generalizable:
+    - t0
+  alias:
+    # Each is an exact duplicate (up to a fixed unit conversion) of a retained
+    # feature: duration_hours, skewness_flux, kurtosis_flux,
+    # outlier_resistance, SES_mean, SES_std, planet_radius_rearth.
+    - duration_days
+    - scale_skewness
+    - scale_kurtosis
+    - scale_outlier_resistance
+    - snr_per_transit_mean
+    - snr_per_transit_std
+    - planet_radius_rjup
+
+# Columns required to be present in every input file, per CLI mode.
+required_columns:
+  train:
+    - candidate_label
+    - detection_status
+  predict: []

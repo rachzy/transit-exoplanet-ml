@@ -1,0 +1,116 @@
+# Resolved configuration for the transit exoplanet stacking model.
+config_version: 1
+seed: 42
+
+objective:
+  # Screening objective: greatest precision subject to a recall floor, measured
+  # on cross-fitted predictions for accepted candidates only.
+  min_recall: 0.95
+  # Metric used for hyper-parameter selection (accepted candidates only).
+  tuning_metric: average_precision
+  # Weight tuning/reporting metrics by the same equal-star weights used to fit.
+  weighted_metrics: true
+
+weighting:
+  # Every star contributes the same total weight to any fit it takes part in.
+  # Weights are recomputed within each fitting subset so the property also holds
+  # for the accepted-only meta-model fit.
+  scheme: equal_star
+
+cv:
+  outer_folds: 5
+  inner_folds: 3
+  min_outer_folds: 3
+  min_inner_folds: 2
+  # Folds used to build out-of-fold base probabilities for the final model.
+  final_oof_folds: 3
+  shuffle: true
+
+bootstrap:
+  # Star-level resampling for confidence intervals on reported metrics.
+  n_resamples: 1000
+  confidence_level: 0.95
+
+permutation_importance:
+  n_repeats: 10
+  # Metric drop measured on held-out outer-fold stars (accepted candidates).
+  metric: average_precision
+
+calibration:
+  n_bins: 10
+
+# ---------------------------------------------------------------------------
+# Base learners. `n_candidates` caps how many combinations are evaluated; the
+# subset is drawn deterministically from `seed`.
+# ---------------------------------------------------------------------------
+models:
+  logistic_regression:
+    n_candidates: 6
+    fixed:
+      # L2 is scikit-learn's default penalty; passing `penalty` explicitly is
+      # deprecated from scikit-learn 1.8, so the default is relied on instead.
+      solver: lbfgs
+      max_iter: 5000
+      class_weight: null
+    grid:
+      C: [0.001, 0.01, 0.1, 1, 10, 100]
+
+  svm_rbf:
+    n_candidates: 24
+    fixed:
+      kernel: rbf
+      class_weight: null
+      cache_size: 500
+    # SVC has no native probability output. `SVC(probability=True)` is deprecated
+    # from scikit-learn 1.9, so the same Platt scaling is applied explicitly.
+    calibration:
+      method: sigmoid
+      cv: 5
+      ensemble: false
+    grid:
+      C: [0.01, 0.1, 1, 10, 100]
+      gamma: [scale, 0.0001, 0.001, 0.01, 0.1, 1]
+
+  extra_trees:
+    n_candidates: 24
+    fixed:
+      n_estimators: 500
+      class_weight: null
+      n_jobs: 1
+    grid:
+      max_depth: [6, 12, null]
+      min_samples_leaf: [1, 3, 5, 10]
+      max_features: [sqrt, 0.5, 1.0]
+
+  lightgbm:
+    n_candidates: 24
+    fixed:
+      objective: binary
+      subsample_freq: 1
+      verbose: -1
+      n_jobs: 1
+      deterministic: true
+      force_row_wise: true
+    grid:
+      n_estimators: [100, 200, 300, 400, 500]
+      learning_rate: [0.02, 0.05, 0.08, 0.1]
+      num_leaves: [7, 15, 23, 31]
+      max_depth: [3, 5, 7]
+      min_child_samples: [10, 20, 30, 40]
+      subsample: [0.7, 0.85, 1.0]
+      colsample_bytree: [0.7, 0.85, 1.0]
+      reg_alpha: [0.0, 0.1, 1.0]
+      reg_lambda: [0.0, 0.1, 1.0]
+
+# Meta-learner: fixed, un-tuned, and sees only the four base probabilities.
+meta:
+  # L2 by default, as above; fixed and never tuned.
+  C: 0.1
+  solver: lbfgs
+  max_iter: 5000
+  class_weight: null
+
+# Reported alongside the stack for comparison. The stack ships regardless.
+baselines:
+  - name: probability_average
+    kind: unweighted_mean

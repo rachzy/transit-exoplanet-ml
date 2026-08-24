@@ -1,0 +1,459 @@
+"""The stacked classifier: grouped splits, tuning, cross-fitting, thresholds.
+
+The same routine (:func:`fit_stack`) builds the stack for an outer evaluation
+fold and for the shipped model, so the reported metrics describe exactly the
+procedure that is saved.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from typing import Any
+
+import numpy as np
+from sklearn.base import BaseEstimator
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.pipeline import Pipeline
+
+from .config import BASE_LEARNERS, Config
+from .data import composite_strata, star_balanced_weights
+from .errors import DataDiversityError
+from .metrics import (
+    ThresholdChoice,
+    accepted_average_precision,
+    select_threshold,
+)
+from .models import build_estimator, build_meta_estimator, candidate_params
+from .preprocessing import build_preprocessor
+
+BASELINE_AVERAGE = "probability_average"
+STACK = "stack"
+
+Progress = Callable[[str], None] | None
+
+Split = tuple[np.ndarray, np.ndarray]
+
+
+def report_progress(progress: Progress, message: str) -> None:
+    """Emit a progress line if the caller supplied a sink."""
+    if progress is not None:
+        progress(message)
+
+
+# ---------------------------------------------------------------------------
+# Grouped splitting
+# ---------------------------------------------------------------------------
+def _support_table(strata: np.ndarray, groups: np.ndarray) -> dict[int, int]:
+    """Distinct groups behind each stratum -- the binding constraint on folds."""
+    return {
+        int(s): int(np.unique(groups[strata == s]).size) for s in np.unique(strata)
+    }
+
+
+def resolve_n_splits(
+    strata: np.ndarray,
+    groups: np.ndarray,
+    desired: int,
+    minimum: int,
+    level: str,
+) -> int:
+    """Largest workable fold count in ``[minimum, desired]``.
+
+    Folds are only reduced when class/star support forces it; if even
+    ``minimum`` folds are impossible the caller gets a diagnostic naming the
+    strata that are too thin.
+    """
+    support = _support_table(strata, groups)
+    n_groups = int(np.unique(groups).size)
+    for n in range(desired, minimum - 1, -1):
+        if n_groups >= n and all(count >= n for count in support.values()):
+            return n
+
+    thin = {s: c for s, c in support.items() if c < minimum}
+    raise DataDiversityError(
+        f"Cannot build {minimum} {level} folds grouped by star: "
+        f"{n_groups} stars available; distinct stars per (label, acceptance) stratum "
+        f"{support}; strata below the {minimum}-star minimum: {thin}. "
+        "Add stars covering the under-represented combinations of candidate_label "
+        "and detection_status."
+    )
+
+
+def grouped_splits(
+    strata: np.ndarray,
+    groups: np.ndarray,
+    n_splits: int,
+    seed: int,
+    shuffle: bool = True,
+) -> list[Split]:
+    """Star-grouped, stratum-balanced splits as concrete index arrays."""
+    splitter = StratifiedGroupKFold(
+        n_splits=n_splits, shuffle=shuffle, random_state=seed if shuffle else None
+    )
+    dummy = np.zeros((strata.size, 1))
+    return [
+        (np.asarray(tr, dtype=int), np.asarray(va, dtype=int))
+        for tr, va in splitter.split(dummy, strata, groups=groups)
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Fitted components
+# ---------------------------------------------------------------------------
+@dataclass
+class FittedBase:
+    """A base learner with the preprocessing pipeline fitted alongside it."""
+
+    learner: str
+    params: dict[str, Any]
+    preprocessor: Pipeline
+    estimator: BaseEstimator
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        classes = np.asarray(getattr(self.estimator, "classes_", [0, 1]))
+        if classes.size == 1:
+            # Degenerate fit fold: fall back to the single observed class.
+            return np.full(len(X), float(classes[0]))
+        transformed = self.preprocessor.transform(X)
+        return np.asarray(self.estimator.predict_proba(transformed))[:, 1]
+
+
+@dataclass
+class FittedStack:
+    """Four fitted base learners plus the logistic meta-model above them."""
+
+    bases: dict[str, FittedBase]
+    meta: LogisticRegression
+    threshold: float
+    feature_names: tuple[str, ...]
+
+    def base_matrix(self, X: np.ndarray) -> np.ndarray:
+        return np.column_stack([self.bases[name].predict_proba(X) for name in BASE_LEARNERS])
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        return np.asarray(self.meta.predict_proba(self.base_matrix(X)))[:, 1]
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        return self.predict_proba(X) >= self.threshold
+
+
+def fit_base(
+    learner: str,
+    params: dict[str, Any],
+    X: np.ndarray,
+    y: np.ndarray,
+    groups: np.ndarray,
+    config: Config,
+) -> FittedBase:
+    """Fit one base learner and its preprocessing on the given rows."""
+    preprocessor = build_preprocessor(learner)
+    transformed = preprocessor.fit_transform(X)
+    estimator = build_estimator(learner, params, config)
+    estimator.fit(transformed, y, sample_weight=star_balanced_weights(groups))
+    return FittedBase(
+        learner=learner, params=dict(params), preprocessor=preprocessor, estimator=estimator
+    )
+
+
+def fit_meta(
+    P: np.ndarray,
+    y: np.ndarray,
+    groups: np.ndarray,
+    config: Config,
+) -> LogisticRegression:
+    """Fit the meta-model on base probabilities for accepted rows only."""
+    meta = build_meta_estimator(config)
+    meta.fit(P, y, sample_weight=star_balanced_weights(groups))
+    return meta
+
+
+# ---------------------------------------------------------------------------
+# Tuning
+# ---------------------------------------------------------------------------
+@dataclass
+class TuningResult:
+    learner: str
+    best_params: dict[str, Any]
+    best_score: float
+    candidates: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "learner": self.learner,
+            "best_params": self.best_params,
+            "best_score": self.best_score,
+            "n_candidates": len(self.candidates),
+            "candidates": self.candidates,
+        }
+
+
+def _score_fold(
+    y: np.ndarray,
+    prob: np.ndarray,
+    accepted: np.ndarray,
+    groups: np.ndarray,
+    weighted: bool,
+) -> float:
+    """Average precision restricted to accepted candidates."""
+    mask = accepted
+    if mask.sum() == 0:
+        return float("nan")
+    weights = star_balanced_weights(groups[mask]) if weighted else None
+    return accepted_average_precision(y[mask], prob[mask], sample_weight=weights)
+
+
+def tune_base_learner(
+    learner: str,
+    X: np.ndarray,
+    y: np.ndarray,
+    accepted: np.ndarray,
+    groups: np.ndarray,
+    splits: Sequence[Split],
+    config: Config,
+    progress: Progress = None,
+) -> TuningResult:
+    """Pick hyper-parameters by mean accepted-candidate average precision."""
+    grid = candidate_params(learner, config)
+    weighted = config.weighted_metrics
+    records: list[dict[str, Any]] = []
+
+    for position, params in enumerate(grid):
+        scores: list[float] = []
+        for tr, va in splits:
+            fitted = fit_base(learner, params, X[tr], y[tr], groups[tr], config)
+            prob = fitted.predict_proba(X[va])
+            scores.append(_score_fold(y[va], prob, accepted[va], groups[va], weighted))
+        valid = [s for s in scores if not np.isnan(s)]
+        mean_score = float(np.mean(valid)) if valid else float("nan")
+        records.append(
+            {
+                "rank_order": position,
+                "params": params,
+                "mean_score": mean_score,
+                "fold_scores": [float(s) for s in scores],
+            }
+        )
+        report_progress(
+            progress,
+            f"    {learner}: candidate {position + 1}/{len(grid)} -> {mean_score:.4f}",
+        )
+
+    scored = [r for r in records if not np.isnan(r["mean_score"])]
+    if not scored:
+        raise DataDiversityError(
+            f"No hyper-parameter candidate for {learner!r} could be scored: every inner "
+            "validation fold lacked accepted candidates of both classes. Add stars with "
+            "accepted CONFIRMED and accepted FALSE-POSITIVE candidates."
+        )
+    # Ties resolve to the earlier candidate, keeping selection deterministic.
+    best = max(scored, key=lambda r: (r["mean_score"], -r["rank_order"]))
+    return TuningResult(
+        learner=learner,
+        best_params=best["params"],
+        best_score=best["mean_score"],
+        candidates=records,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cross-fitting
+# ---------------------------------------------------------------------------
+def base_oof_matrix(
+    best_params: dict[str, dict[str, Any]],
+    X: np.ndarray,
+    y: np.ndarray,
+    groups: np.ndarray,
+    splits: Sequence[Split],
+    config: Config,
+) -> np.ndarray:
+    """Out-of-fold base probabilities, one column per learner."""
+    P = np.full((X.shape[0], len(BASE_LEARNERS)), np.nan, dtype=float)
+    for tr, va in splits:
+        for column, learner in enumerate(BASE_LEARNERS):
+            fitted = fit_base(learner, best_params[learner], X[tr], y[tr], groups[tr], config)
+            P[va, column] = fitted.predict_proba(X[va])
+    if np.isnan(P).any():
+        missing = int(np.isnan(P).any(axis=1).sum())
+        raise DataDiversityError(
+            f"{missing} rows received no out-of-fold base prediction. The grouped split "
+            "did not cover every row; check star support per stratum."
+        )
+    return P
+
+
+def crossfit_meta_predictions(
+    P: np.ndarray,
+    y: np.ndarray,
+    accepted: np.ndarray,
+    groups: np.ndarray,
+    splits: Sequence[Split],
+    config: Config,
+) -> np.ndarray:
+    """Cross-fitted meta probabilities for accepted rows; NaN elsewhere.
+
+    The meta-model is cross-fitted as well as the bases so the threshold is
+    never chosen on predictions the meta-model has already seen.
+    """
+    predictions = np.full(P.shape[0], np.nan, dtype=float)
+    for tr, va in splits:
+        train_rows = tr[accepted[tr]]
+        val_rows = va[accepted[va]]
+        if val_rows.size == 0:
+            continue
+        if train_rows.size == 0 or np.unique(y[train_rows]).size < 2:
+            continue
+        meta = fit_meta(P[train_rows], y[train_rows], groups[train_rows], config)
+        predictions[val_rows] = np.asarray(meta.predict_proba(P[val_rows]))[:, 1]
+    return predictions
+
+
+# ---------------------------------------------------------------------------
+# Whole-stack fit
+# ---------------------------------------------------------------------------
+@dataclass
+class StackFitResult:
+    """Everything produced by fitting the stack on one training set."""
+
+    stack: FittedStack
+    best_params: dict[str, dict[str, Any]]
+    tuning: dict[str, TuningResult]
+    base_oof: np.ndarray
+    meta_crossfit: np.ndarray
+    thresholds: dict[str, ThresholdChoice]
+    n_inner_folds: int
+    train_stars: tuple[str, ...]
+
+    @property
+    def threshold(self) -> float:
+        return self.thresholds[STACK].threshold
+
+    def training_probabilities(self) -> dict[str, np.ndarray]:
+        """Cross-fitted training-side probabilities, per reported model."""
+        out: dict[str, np.ndarray] = {STACK: self.meta_crossfit}
+        for column, learner in enumerate(BASE_LEARNERS):
+            out[learner] = self.base_oof[:, column]
+        out[BASELINE_AVERAGE] = self.base_oof.mean(axis=1)
+        return out
+
+
+def model_probabilities(result: StackFitResult, X: np.ndarray) -> dict[str, np.ndarray]:
+    """Probabilities from the stack, each base learner, and the mean baseline."""
+    base = result.stack.base_matrix(X)
+    out: dict[str, np.ndarray] = {
+        STACK: np.asarray(result.stack.meta.predict_proba(base))[:, 1]
+    }
+    for column, learner in enumerate(BASE_LEARNERS):
+        out[learner] = base[:, column]
+    out[BASELINE_AVERAGE] = base.mean(axis=1)
+    return out
+
+
+def reported_models() -> tuple[str, ...]:
+    return (STACK, *BASE_LEARNERS, BASELINE_AVERAGE)
+
+
+def fit_stack(
+    X: np.ndarray,
+    y: np.ndarray,
+    accepted: np.ndarray,
+    groups: np.ndarray,
+    config: Config,
+    feature_names: Sequence[str],
+    n_inner_splits: int | None = None,
+    progress: Progress = None,
+) -> StackFitResult:
+    """Tune, cross-fit, and assemble the stack on one training set.
+
+    Steps, in order: tune each base learner by inner grouped CV; build
+    out-of-fold base probabilities; cross-fit the meta-model over the same
+    folds to obtain honest training-side predictions; choose the recall-floor
+    threshold from those; then refit the meta-model on all accepted rows and
+    the bases on all rows.
+    """
+    strata = composite_strata(y, accepted)
+    cv = config.cv
+    n_splits = n_inner_splits or resolve_n_splits(
+        strata, groups, int(cv["inner_folds"]), int(cv["min_inner_folds"]), "inner"
+    )
+    splits = grouped_splits(strata, groups, n_splits, config.seed, bool(cv.get("shuffle", True)))
+
+    tuning: dict[str, TuningResult] = {}
+    for learner in BASE_LEARNERS:
+        report_progress(progress, f"  tuning {learner} ({n_splits} inner folds)")
+        tuning[learner] = tune_base_learner(
+            learner, X, y, accepted, groups, splits, config, progress
+        )
+    best_params = {name: result.best_params for name, result in tuning.items()}
+
+    report_progress(progress, "  building out-of-fold base probabilities")
+    base_oof = base_oof_matrix(best_params, X, y, groups, splits, config)
+
+    report_progress(progress, "  cross-fitting the meta-model")
+    meta_crossfit = crossfit_meta_predictions(
+        base_oof, y, accepted, groups, splits, config
+    )
+
+    thresholds = _choose_thresholds(
+        base_oof, meta_crossfit, y, accepted, groups, config
+    )
+
+    report_progress(progress, "  refitting base learners and meta-model on the full training set")
+    accepted_rows = np.flatnonzero(accepted)
+    meta = fit_meta(
+        base_oof[accepted_rows], y[accepted_rows], groups[accepted_rows], config
+    )
+    bases = {
+        learner: fit_base(learner, best_params[learner], X, y, groups, config)
+        for learner in BASE_LEARNERS
+    }
+
+    stack = FittedStack(
+        bases=bases,
+        meta=meta,
+        threshold=thresholds[STACK].threshold,
+        feature_names=tuple(feature_names),
+    )
+    return StackFitResult(
+        stack=stack,
+        best_params=best_params,
+        tuning=tuning,
+        base_oof=base_oof,
+        meta_crossfit=meta_crossfit,
+        thresholds=thresholds,
+        n_inner_folds=n_splits,
+        train_stars=tuple(sorted(set(np.asarray(groups, dtype=object).tolist()))),
+    )
+
+
+def _choose_thresholds(
+    base_oof: np.ndarray,
+    meta_crossfit: np.ndarray,
+    y: np.ndarray,
+    accepted: np.ndarray,
+    groups: np.ndarray,
+    config: Config,
+) -> dict[str, ThresholdChoice]:
+    """One recall-floor threshold per reported model, from training rows only."""
+    usable = accepted & ~np.isnan(meta_crossfit)
+    rows = np.flatnonzero(usable)
+    if rows.size == 0 or np.unique(y[rows]).size < 2:
+        raise DataDiversityError(
+            "No cross-fitted accepted candidates of both classes were available for "
+            "threshold selection. Add stars with accepted CONFIRMED and accepted "
+            "FALSE-POSITIVE candidates."
+        )
+    weights = star_balanced_weights(groups[rows]) if config.weighted_metrics else None
+
+    sources: dict[str, np.ndarray] = {STACK: meta_crossfit}
+    for column, learner in enumerate(BASE_LEARNERS):
+        sources[learner] = base_oof[:, column]
+    sources[BASELINE_AVERAGE] = base_oof.mean(axis=1)
+
+    return {
+        name: select_threshold(
+            y[rows], probabilities[rows], config.min_recall, sample_weight=weights
+        )
+        for name, probabilities in sources.items()
+    }

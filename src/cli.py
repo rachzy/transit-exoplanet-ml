@@ -1,0 +1,304 @@
+"""The ``exoplanet-ml`` command line interface."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Annotated
+
+import typer
+
+from . import __version__
+from .config import load_config
+from .data import load_dataset, validate_dataset
+from .errors import TransitExoplanetMLError
+from .evaluate import evaluate_dataset
+from .predict import predict_dataset, prediction_counts
+from .schema import load_schema
+from .stacking import STACK, reported_models
+from .training import (
+    train_model,
+    write_evaluation_artifacts,
+    write_training_artifacts,
+)
+
+app = typer.Typer(
+    name="exoplanet-ml",
+    help=(
+        "Screen transit exoplanet candidates with a star-grouped stacked classifier. "
+        "potential_probability is a screening score, not scientific confirmation."
+    ),
+    no_args_is_help=True,
+    add_completion=False,
+)
+
+DataDir = Annotated[
+    Path, typer.Option("--data-dir", help="Directory of <star-name>_<YYYYMMDD>.csv files.")
+]
+ConfigOpt = Annotated[
+    Path | None, typer.Option("--config", help="Override the packaged configuration YAML.")
+]
+SchemaOpt = Annotated[
+    Path | None, typer.Option("--schema", help="Override the packaged feature schema YAML.")
+]
+QuietOpt = Annotated[bool, typer.Option("--quiet", help="Suppress progress output.")]
+
+
+def _echo(message: str) -> None:
+    typer.echo(message)
+
+
+def _progress(quiet: bool):
+    if quiet:
+        return None
+
+    def emit(message: str) -> None:
+        typer.echo(message, err=True)
+
+    return emit
+
+
+def _fail(exc: Exception) -> None:
+    typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
+    raise typer.Exit(code=1)
+
+
+def _fmt(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return "n/a" if value != value else f"{value:.4f}"  # NaN check
+    except TypeError:  # pragma: no cover - defensive
+        return str(value)
+
+
+@app.callback(invoke_without_command=True)
+def main(
+    version: Annotated[
+        bool, typer.Option("--version", help="Print the package version and exit.")
+    ] = False,
+) -> None:
+    if version:
+        typer.echo(__version__)
+        raise typer.Exit()
+
+
+@app.command()
+def validate(
+    data_dir: DataDir,
+    mode: Annotated[
+        str, typer.Option("--mode", help="train requires labels and statuses; predict does not.")
+    ] = "train",
+    schema: SchemaOpt = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit the summary as JSON.")] = False,
+) -> None:
+    """Check a data directory against the versioned data contract."""
+    try:
+        summary = validate_dataset(data_dir, mode=mode, schema=load_schema(schema))
+    except TransitExoplanetMLError as exc:
+        _fail(exc)
+        return
+
+    if as_json:
+        _echo(json.dumps(summary, indent=2))
+        return
+
+    typer.secho(f"OK  {data_dir} passes the {mode} contract.", fg=typer.colors.GREEN)
+    _echo(f"  schema version : {summary['schema_version']}")
+    _echo(f"  files / stars  : {summary['n_files']} / {summary['n_stars']}")
+    _echo(f"  candidate rows : {summary['n_rows']}")
+    _echo(f"  model features : {summary['n_features']}")
+    if "n_accepted" in summary:
+        _echo(
+            f"  labels         : {summary['n_positive']} CONFIRMED / "
+            f"{summary['n_negative']} FALSE-POSITIVE"
+        )
+        _echo(
+            f"  accepted       : {summary['n_accepted']} "
+            f"({summary['n_accepted_positive']} CONFIRMED / "
+            f"{summary['n_accepted_negative']} FALSE-POSITIVE)"
+        )
+        _echo(f"  status counts  : {summary['status_counts']}")
+
+
+@app.command()
+def evaluate(
+    data_dir: DataDir,
+    output_dir: Annotated[
+        Path, typer.Option("--output-dir", help="Where the evaluation report is written.")
+    ],
+    config: ConfigOpt = None,
+    schema: SchemaOpt = None,
+    quiet: QuietOpt = False,
+) -> None:
+    """Run nested, star-grouped evaluation and write the full report."""
+    try:
+        resolved = load_config(config)
+        dataset = load_dataset(data_dir, mode="train", schema=load_schema(schema))
+        result = evaluate_dataset(
+            dataset=dataset, config=resolved, progress=_progress(quiet)
+        )
+        written = write_evaluation_artifacts(
+            result, Path(output_dir), seed=resolved.seed
+        )
+    except TransitExoplanetMLError as exc:
+        _fail(exc)
+        return
+
+    _echo("")
+    _echo(
+        f"Nested evaluation: {result.n_outer_folds} outer folds, "
+        f"inner folds {result.inner_folds_per_outer}, "
+        f"{result.dataset_summary['n_stars']} stars, "
+        f"{result.dataset_summary['n_rows']} candidates."
+    )
+    _echo("")
+    _echo(f"{'model':22s} {'precision':>10s} {'recall':>8s} {'F2':>8s} {'AP':>8s} {'ROC-AUC':>8s}")
+    for name in reported_models():
+        metrics = result.pooled_metrics[name]
+        marker = " *" if name == STACK else "  "
+        _echo(
+            f"{name:20s}{marker} {_fmt(metrics['precision']):>10s} "
+            f"{_fmt(metrics['recall']):>8s} {_fmt(metrics['f2']):>8s} "
+            f"{_fmt(metrics['average_precision']):>8s} {_fmt(metrics['roc_auc']):>8s}"
+        )
+    _echo("")
+    _echo("* production stack (shipped regardless of comparator performance)")
+    _report_underperformance(result)
+    floor = result.config["objective"]["min_recall"]
+    if result.stack_meets_recall_floor:
+        typer.secho(
+            f"Stack meets the {floor:.0%} recall floor on held-out accepted candidates.",
+            fg=typer.colors.GREEN,
+        )
+    else:
+        typer.secho(
+            f"WARNING: pooled held-out recall {_fmt(result.pooled_metrics[STACK]['recall'])} "
+            f"is below the {floor:.0%} floor. The floor is enforced on cross-fitted "
+            "training predictions; held-out recall can fall short on unseen stars.",
+            fg=typer.colors.YELLOW,
+        )
+    _echo(f"\nWrote {len(written)} files to {output_dir}")
+
+
+def _report_underperformance(result) -> None:
+    """Say plainly when a comparator beats the stack."""
+    stack_ap = result.pooled_metrics[STACK]["average_precision"]
+    better = [
+        (name, result.pooled_metrics[name]["average_precision"])
+        for name in reported_models()
+        if name != STACK and result.pooled_metrics[name]["average_precision"] > stack_ap
+    ]
+    if not better:
+        return
+    ranked = ", ".join(
+        f"{name} (AP {_fmt(ap)})" for name, ap in sorted(better, key=lambda row: -row[1])
+    )
+    typer.secho(
+        f"NOTE: the stack (AP {_fmt(stack_ap)}) is outperformed on average precision by: "
+        f"{ranked}. The stack still ships, by design.",
+        fg=typer.colors.YELLOW,
+    )
+
+
+@app.command()
+def train(
+    data_dir: DataDir,
+    artifact_dir: Annotated[
+        Path,
+        typer.Option(
+            "--artifact-dir",
+            help="Base directory; a run-id subdirectory is created inside it.",
+        ),
+    ],
+    config: ConfigOpt = None,
+    schema: SchemaOpt = None,
+    skip_evaluation: Annotated[
+        bool,
+        typer.Option(
+            "--skip-evaluation",
+            help="Fit without the nested evaluation. The artifact then lacks honest metrics.",
+        ),
+    ] = False,
+    overwrite: Annotated[
+        bool, typer.Option("--overwrite", help="Allow writing into a non-empty run directory.")
+    ] = False,
+    quiet: QuietOpt = False,
+) -> None:
+    """Train the production stack and save an immutable artifact directory."""
+    try:
+        resolved = load_config(config)
+        dataset = load_dataset(data_dir, mode="train", schema=load_schema(schema))
+        run = train_model(
+            dataset=dataset,
+            config=resolved,
+            run_evaluation=not skip_evaluation,
+            progress=_progress(quiet),
+        )
+        run = write_training_artifacts(run, artifact_dir, overwrite=overwrite)
+    except TransitExoplanetMLError as exc:
+        _fail(exc)
+        return
+
+    report = run.report
+    stack = report["models"][STACK]["crossfit_metrics"]
+    _echo("")
+    typer.secho(f"Trained run {run.bundle.run_id}", fg=typer.colors.GREEN)
+    _echo(f"  stars / candidates : {len(run.bundle.train_stars)} / {report['dataset']['n_rows']}")
+    _echo(f"  saved threshold    : {run.bundle.threshold:.6f}")
+    _echo(
+        f"  cross-fitted       : precision {_fmt(stack['precision'])}, "
+        f"recall {_fmt(stack['recall'])}, AP {_fmt(stack['average_precision'])}"
+    )
+    if report["recall_floor_met"]:
+        typer.secho(
+            f"  recall floor       : met ({report['recall_floor']:.0%})", fg=typer.colors.GREEN
+        )
+    else:
+        typer.secho(
+            f"  recall floor       : NOT met ({report['recall_floor']:.0%})",
+            fg=typer.colors.RED,
+        )
+    if run.evaluation is not None:
+        _report_underperformance(run.evaluation)
+    _echo(f"  artifacts          : {run.artifact_dir} ({len(run.written)} files)")
+
+
+@app.command()
+def predict(
+    model_dir: Annotated[
+        Path, typer.Option("--model-dir", help="Artifact directory or path to model.joblib.")
+    ],
+    data_dir: DataDir,
+    output: Annotated[
+        Path, typer.Option("--output", help="Destination CSV for the consolidated predictions.")
+    ] = Path("predictions.csv"),
+    schema: SchemaOpt = None,
+) -> None:
+    """Score unseen candidate files into one consolidated prediction CSV."""
+    try:
+        frame = predict_dataset(
+            model_dir,
+            data_dir=data_dir,
+            output=output,
+            schema=load_schema(schema) if schema else None,
+        )
+    except (TransitExoplanetMLError, FileNotFoundError) as exc:
+        _fail(exc)
+        return
+
+    counts = prediction_counts(frame)
+    typer.secho(f"Wrote {counts['n_rows']} predictions to {output}", fg=typer.colors.GREEN)
+    _echo(f"  stars     : {counts['n_stars']}")
+    _echo(f"  POTENTIAL : {counts['POTENTIAL']}")
+    _echo(f"  UNLIKELY  : {counts['UNLIKELY']}")
+    _echo(f"  threshold : {frame['decision_threshold'].iloc[0]:.6f}")
+    _echo("")
+    _echo(
+        "POTENTIAL is a screening flag from a model trained on literature-derived "
+        "labels. It is not a confirmation."
+    )
+
+
+if __name__ == "__main__":  # pragma: no cover
+    app()
