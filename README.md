@@ -105,7 +105,7 @@ output is byte-stable across runs.
 ## Python API
 
 ```python
-from transit_exoplanet_ml import (
+from src import (
     load_dataset, validate_dataset, evaluate_dataset,
     train_model, load_model, predict_dataset,
 )
@@ -195,9 +195,11 @@ from a location you trust.
 
 ```bash
 uv run pytest              # 173 tests, no repository data required
-uv run ruff check src tests
+uv run ruff check src
 uv run coverage run -m pytest && uv run coverage report
 ```
+
+A `Makefile` wraps the common commands above; run `make help` for the list.
 
 Processed CSVs under `data/` are tracked in Git. Virtual environments, caches,
 generated models, reports, and predictions are ignored.
