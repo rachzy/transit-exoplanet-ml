@@ -15,7 +15,7 @@ from .errors import TransitExoplanetMLError
 from .evaluate import evaluate_dataset
 from .predict import predict_dataset, prediction_counts
 from .schema import load_schema
-from .stacking import STACK, reported_models
+from .stacking import reported_models, select_best_model
 from .training import (
     train_model,
     write_evaluation_artifacts,
@@ -152,53 +152,62 @@ def evaluate(
         f"{result.dataset_summary['n_stars']} stars, "
         f"{result.dataset_summary['n_rows']} candidates."
     )
+    metric = resolved.selection["metric"]
+    scores = result.selection_scores(metric)
+    would_ship = select_best_model(scores, resolved.selection_candidates)
+
     _echo("")
     _echo(f"{'model':22s} {'precision':>10s} {'recall':>8s} {'F2':>8s} {'AP':>8s} {'ROC-AUC':>8s}")
     for name in reported_models():
         metrics = result.pooled_metrics[name]
-        marker = " *" if name == STACK else "  "
+        marker = " *" if name == would_ship else "  "
         _echo(
             f"{name:20s}{marker} {_fmt(metrics['precision']):>10s} "
             f"{_fmt(metrics['recall']):>8s} {_fmt(metrics['f2']):>8s} "
             f"{_fmt(metrics['average_precision']):>8s} {_fmt(metrics['roc_auc']):>8s}"
         )
     _echo("")
-    _echo("* production stack (shipped regardless of comparator performance)")
-    _report_underperformance(result)
+    _echo(f"* highest {metric}; `train` would ship this model")
+
+    ranked = sorted(
+        ((n, s) for n, s in scores.items() if s == s), key=lambda row: -row[1]
+    )
+    margin = ranked[0][1] - ranked[1][1] if len(ranked) > 1 else None
+    _report_selection_bias(margin, len(resolved.selection_candidates))
+
     floor = result.config["objective"]["min_recall"]
-    if result.stack_meets_recall_floor:
+    if result.meets_recall_floor(would_ship):
         typer.secho(
-            f"Stack meets the {floor:.0%} recall floor on held-out accepted candidates.",
+            f"{would_ship} meets the {floor:.0%} recall floor on held-out accepted "
+            "candidates.",
             fg=typer.colors.GREEN,
         )
     else:
         typer.secho(
-            f"WARNING: pooled held-out recall {_fmt(result.pooled_metrics[STACK]['recall'])} "
-            f"is below the {floor:.0%} floor. The floor is enforced on cross-fitted "
-            "training predictions; held-out recall can fall short on unseen stars.",
+            f"WARNING: pooled held-out recall for {would_ship} "
+            f"({_fmt(result.pooled_metrics[would_ship]['recall'])}) is below the "
+            f"{floor:.0%} floor. The floor is enforced on cross-fitted training "
+            "predictions; held-out recall can fall short on unseen stars.",
             fg=typer.colors.YELLOW,
         )
     _echo(f"\nWrote {len(written)} files to {output_dir}")
 
 
-def _report_underperformance(result) -> None:
-    """Say plainly when a comparator beats the stack."""
-    stack_ap = result.pooled_metrics[STACK]["average_precision"]
-    better = [
-        (name, result.pooled_metrics[name]["average_precision"])
-        for name in reported_models()
-        if name != STACK and result.pooled_metrics[name]["average_precision"] > stack_ap
-    ]
-    if not better:
-        return
-    ranked = ", ".join(
-        f"{name} (AP {_fmt(ap)})" for name, ap in sorted(better, key=lambda row: -row[1])
-    )
+def _report_selection_bias(margin: float | None, n_candidates: int) -> None:
+    """Warn that a metric used to choose the winner also over-rates it."""
     typer.secho(
-        f"NOTE: the stack (AP {_fmt(stack_ap)}) is outperformed on average precision by: "
-        f"{ranked}. The stack still ships, by design.",
+        f"NOTE: the winner was chosen on the same held-out score that is reported for "
+        f"it. Taking the best of {n_candidates} correlated estimates biases that score "
+        "upward, so treat it as an optimistic estimate of future performance.",
         fg=typer.colors.YELLOW,
     )
+    if margin is not None and margin < 0.02:
+        typer.secho(
+            f"NOTE: the winning margin over the runner-up is only {margin:.4f}. That is "
+            "well inside the bootstrap intervals, so the ranking is not stable -- a "
+            "different sample of stars would likely pick a different model.",
+            fg=typer.colors.YELLOW,
+        )
 
 
 @app.command()
@@ -241,14 +250,25 @@ def train(
         return
 
     report = run.report
-    stack = report["models"][STACK]["crossfit_metrics"]
+    selection = run.bundle.selection
+    selected = report["models"][selection.selected_model]["crossfit_metrics"]
     _echo("")
     typer.secho(f"Trained run {run.bundle.run_id}", fg=typer.colors.GREEN)
     _echo(f"  stars / candidates : {len(run.bundle.train_stars)} / {report['dataset']['n_rows']}")
+    typer.secho(
+        f"  shipping model     : {selection.selected_model}", fg=typer.colors.GREEN, bold=True
+    )
+    _echo(
+        f"  chosen by          : {selection.metric} on {selection.score_source} "
+        f"(strategy: {selection.strategy})"
+    )
+    _echo("  ranking            : " + ", ".join(
+        f"{name} {_fmt(score)}" for name, score in selection.ranked
+    ))
     _echo(f"  saved threshold    : {run.bundle.threshold:.6f}")
     _echo(
-        f"  cross-fitted       : precision {_fmt(stack['precision'])}, "
-        f"recall {_fmt(stack['recall'])}, AP {_fmt(stack['average_precision'])}"
+        f"  cross-fitted       : precision {_fmt(selected['precision'])}, "
+        f"recall {_fmt(selected['recall'])}, AP {_fmt(selected['average_precision'])}"
     )
     if report["recall_floor_met"]:
         typer.secho(
@@ -259,9 +279,10 @@ def train(
             f"  recall floor       : NOT met ({report['recall_floor']:.0%})",
             fg=typer.colors.RED,
         )
-    if run.evaluation is not None:
-        _report_underperformance(run.evaluation)
     _echo(f"  artifacts          : {run.artifact_dir} ({len(run.written)} files)")
+    _echo("")
+    if selection.strategy == "best":
+        _report_selection_bias(selection.margin, len(selection.candidates))
 
 
 @app.command()

@@ -14,9 +14,19 @@
 | **Seed**          | 42                                                                               |
 | **License**       | see `LICENSE`                                                                    |
 
-The production model is **always** this stack. If a single base learner or the
-unweighted probability-average baseline scores higher, the stack still ships and
-the underperformance is reported by the CLI and recorded in the artifact.
+All six candidates are fitted on every run and **the one with the highest
+average precision ships**. The full ranking, the runner-up, and the winning
+margin are recorded in `selection.json` and printed by the CLI. Every candidate
+stays in the bundle, so the choice can be revisited without refitting; setting
+`selection.strategy` to a model name pins that model instead.
+
+**The reported score for the winner is optimistically biased.** It is the
+maximum of six correlated held-out estimates, chosen on the same numbers it is
+then reported against. On a few dozen stars the winning margin is routinely
+smaller than the bootstrap intervals, which means the ranking itself is unstable
+-- a different sample of stars would plausibly crown a different model. Read the
+winner as "one of several statistically indistinguishable options", not as an
+established best.
 
 ## Intended use
 
@@ -110,97 +120,92 @@ fold selects its threshold using only its outer-training predictions and then
 applies it to untouched outer-validation stars. Permutation importance is
 computed solely on held-out stars, and the per-fold distributions are aggregated.
 
-Reported for the stack, every base learner, and an unweighted
-probability-average baseline: precision and recall at the chosen threshold,
+Reported for all six candidates -- the stack, every base learner, and the
+unweighted probability-average baseline: precision and recall at the chosen threshold,
 average precision, ROC-AUC, F2, confusion matrix, Brier score, log loss, a
 calibration curve, per-star summaries, and star-bootstrap 95 % confidence
 intervals.
 
 ## Results
 
-Run `20260824T150116Z-4ad52e7f`, seed 42, schema version 1.
+Run `20260824T181710Z-256238b4`, seed 42, schema version 1.
 
 ### Training set
 
-|                         |                                       |
-| ----------------------- | ------------------------------------- |
-| Stars                   | 35                                    |
-| Candidates              | 228                                   |
-| Accepted candidates     | 87 (67 CONFIRMED / 20 FALSE-POSITIVE) |
-| Non-accepted candidates | 141 (base-learner training only)      |
-| Model features          | 36                                    |
+| | |
+| --- | --- |
+| Stars | 35 |
+| Candidates | 228 |
+| Accepted candidates | 87 (71 CONFIRMED / 16 FALSE-POSITIVE) |
+| Non-accepted candidates | 141 (base-learner training only) |
+| Model features | 36 |
 
-Accepted candidates are **77% CONFIRMED**. That is the precision a "flag everything" rule would achieve at 100 % recall, and it is the number every precision below should be read against.
+Accepted candidates are **82% CONFIRMED**. That is the precision a "flag everything" rule would achieve at 100 % recall, and it is the number every precision below should be read against.
+
+### Selection
+
+**Shipped model: `lightgbm`**, chosen by average_precision on nested evaluation.
+
+| Rank | Model | average_precision |
+| --- | --- | --- |
+| 1 | LightGBM **← shipped** | 0.978 |
+| 2 | ExtraTrees | 0.962 |
+| 3 | Probability average | 0.951 |
+| 4 | RBF SVM | 0.915 |
+| 5 | Logistic regression | 0.894 |
+| 6 | Stack | 0.893 |
+
+The winning margin over the runner-up (ExtraTrees) is **0.0160**, against a 95 % bootstrap interval for the winner of 0.949 – 0.995. The margin is far smaller than that interval, so the ranking is not stable: a different sample of stars would plausibly select a different model. The winner should be read as one of several statistically indistinguishable options, and its headline score as optimistic -- it is the maximum of 6 correlated estimates chosen on the same numbers reported for it.
 
 ### Nested evaluation
 
 5 outer folds, inner folds [3, 3, 3, 3, 3], grouped by star. Each fold picked its own threshold from its outer-training predictions only. Intervals are percentile 95 % CIs from 1000 star-level bootstrap resamples.
 
-| Model                          | Precision | 95 % CI       | Recall | 95 % CI       | F2    | AP    | 95 % CI       | ROC-AUC | Brier | Log loss |
-| ------------------------------ | --------- | ------------- | ------ | ------------- | ----- | ----- | ------------- | ------- | ----- | -------- |
-| **Stack (production)**         | 0.829     | 0.697 – 0.932 | 1.000  | 1.000 – 1.000 | 0.960 | 0.885 | 0.748 – 0.979 | 0.659   | 0.153 | 0.480    |
-| LightGBM                       | 0.840     | 0.701 – 0.949 | 0.933  | 0.842 – 1.000 | 0.913 | 0.887 | 0.730 – 0.990 | 0.719   | 0.169 | 0.584    |
-| ExtraTrees                     | 0.829     | 0.693 – 0.937 | 0.933  | 0.842 – 1.000 | 0.911 | 0.864 | 0.719 – 0.982 | 0.654   | 0.220 | 0.636    |
-| RBF SVM                        | 0.816     | 0.682 – 0.914 | 0.962  | 0.917 – 1.000 | 0.929 | 0.891 | 0.785 – 0.963 | 0.654   | 0.307 | 0.827    |
-| Logistic regression            | 0.796     | 0.667 – 0.901 | 0.935  | 0.837 – 1.000 | 0.904 | 0.793 | 0.642 – 0.973 | 0.571   | 0.262 | 2.494    |
-| Probability average (baseline) | 0.842     | 0.713 – 0.944 | 0.922  | 0.806 – 1.000 | 0.905 | 0.915 | 0.800 – 0.985 | 0.746   | 0.182 | 0.541    |
+| Model | Precision | 95 % CI | Recall | 95 % CI | F2 | AP | 95 % CI | ROC-AUC | Brier | Log loss |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Stack | 0.864 | 0.756 – 0.944 | 0.986 | 0.962 – 1.000 | 0.959 | 0.893 | 0.771 – 0.991 | 0.680 | 0.133 | 0.431 |
+| **LightGBM (shipped)** | 0.867 | 0.757 – 0.949 | 0.967 | 0.919 – 1.000 | 0.945 | 0.978 | 0.949 – 0.995 | 0.893 | 0.114 | 0.326 |
+| ExtraTrees | 0.869 | 0.765 – 0.950 | 0.953 | 0.871 – 1.000 | 0.935 | 0.962 | 0.915 – 0.993 | 0.844 | 0.191 | 0.564 |
+| RBF SVM | 0.842 | 0.731 – 0.934 | 0.941 | 0.856 – 1.000 | 0.919 | 0.915 | 0.816 – 0.986 | 0.703 | 0.250 | 0.900 |
+| Logistic regression | 0.860 | 0.738 – 0.949 | 0.837 | 0.714 – 0.956 | 0.841 | 0.894 | 0.776 – 0.988 | 0.650 | 0.275 | 1.516 |
+| Probability average | 0.868 | 0.757 – 0.955 | 0.882 | 0.770 – 0.979 | 0.879 | 0.951 | 0.891 – 0.994 | 0.799 | 0.171 | 0.511 |
 
-Pooled held-out confusion matrix for the stack: 67 true positives, 17 false positives, 0 false negatives, 3 true negatives.
-
-On the metric the objective actually targets, the stack has the best F2 (0.960) and the highest recall (1.000) of any model reported here.
-
-**It is nevertheless outperformed on threshold-free ranking**: average precision 0.885 against Probability average (baseline) (0.915), RBF SVM (0.891), LightGBM (0.887). The stack ships regardless, as specified. Two things drive this, and both are consequences of a small meta-training set rather than of a defect:
-
-1. The meta-model is fitted on the out-of-fold base probabilities of 87 accepted candidates. Four correlated inputs and that many rows are not enough to learn reliably which base learner to trust, so the learned blend generalises worse than the unweighted average of the same four probabilities.
-2. The blend necessarily carries weight on the weakest base learner (logistic regression, AP 0.793), which a single strong learner does not.
-
-The practical reading: the stack is the safer choice at the high-recall operating point it was tuned for, and the weaker choice if the scores are used to rank candidates rather than to threshold them.
+Pooled held-out confusion matrix for `lightgbm`: 68 true positives, 11 false positives, 3 false negatives, 5 true negatives.
 
 ### Saved operating point
 
-|                                         |          |
-| --------------------------------------- | -------- |
-| Threshold                               | 0.707237 |
-| Recall floor                            | 95%      |
-| Floor met on cross-fitted training rows | yes      |
-| Cross-fitted precision                  | 0.810    |
-| Cross-fitted recall                     | 1.000    |
-| Cross-fitted average precision          | 0.888    |
+| | |
+| --- | --- |
+| Shipped model | `lightgbm` |
+| Threshold | 0.184683 |
+| Recall floor | 95% |
+| Floor met on cross-fitted training rows | yes |
+| Cross-fitted precision | 0.896 |
+| Cross-fitted recall | 0.986 |
+| Cross-fitted average precision | 0.975 |
 
-The threshold is fitted on training stars. Pooled held-out recall for the stack was 1.000 (CI 1.000 – 1.000).
+The threshold is fitted on training stars. Pooled held-out recall for the shipped model was 0.967 (CI 0.919 – 1.000).
 
 ### Most important features
 
-Permutation importance on held-out outer-fold stars, as the drop in accepted-candidate average precision; mean over folds and repeats, ± the standard deviation of the per-fold means.
+Permutation importance for `lightgbm` on held-out outer-fold stars, as the drop in accepted-candidate average precision; mean over folds and repeats, ± the standard deviation of the per-fold means.
 
-| Feature                | Importance | ±      |
-| ---------------------- | ---------- | ------ |
-| `MES`                  | 0.0178     | 0.0296 |
-| `planet_radius_rearth` | 0.0140     | 0.0203 |
-| `period_days`          | 0.0104     | 0.0140 |
-| `vshape_metric`        | 0.0094     | 0.0322 |
-| `skewness_flux`        | 0.0086     | 0.0072 |
-| `max_mes`              | 0.0076     | 0.0102 |
-| `SES_mean`             | 0.0066     | 0.0083 |
-| `acf_lag_3h`           | 0.0058     | 0.0092 |
-| `acf_lag_12h`          | 0.0058     | 0.0058 |
-| `secondary_depth_snr`  | 0.0054     | 0.0076 |
+| Feature | Importance | ± |
+| --- | --- | --- |
+| `MES` | 0.0383 | 0.0207 |
+| `secondary_depth_snr` | 0.0125 | 0.0147 |
+| `vshape_metric` | 0.0081 | 0.0101 |
+| `max_mes` | 0.0020 | 0.0050 |
+| `odd_even_depth_ratio` | 0.0019 | 0.0078 |
+| `acf_lag_12h` | 0.0011 | 0.0024 |
+| `secondary_depth` | 0.0002 | 0.0023 |
+| `acf_lag_24h` | 0.0001 | 0.0035 |
+| `acf_lag_1h` | 0.0001 | 0.0001 |
+| `max_ses` | 0.0000 | 0.0000 |
 
-For most features the fold-to-fold spread exceeds the mean, so **no single
-feature is robustly important** across held-out stars. Read this table as a weak
-ordering, not as an attribution: the signal is spread thinly across the
-transit-significance and geometry features rather than concentrated in any one
-of them.
+Where the fold-to-fold spread exceeds the mean, that feature's importance is not distinguishable from noise across held-out stars; read the table as a weak ordering rather than an attribution.
 
-A second observation worth recording: the stack's cross-fitted probabilities all
-fall in a narrow band, roughly 0.65 – 0.90, which is what the score-separation
-plot shows. An L2 logistic meta-model at `C = 0.1` reading four unscaled
-probabilities is strongly shrunk toward its intercept, so `potential_probability`
-compresses. Ranking survives the compression, but the values should not be read
-as calibrated confidences; the calibration curve in the plots directory is the
-honest view.
-
-Plots for calibration, precision-recall, ROC, score separation, permutation importance, and the model comparison are in `20260824T150116Z-4ad52e7f/evaluation/plots/`.
+Plots for calibration, precision-recall, ROC, score separation, permutation importance, and the model comparison are in `20260824T181710Z-256238b4/evaluation/plots/`.
 
 ## Limitations
 
@@ -223,6 +228,12 @@ Plots for calibration, precision-recall, ROC, score separation, permutation impo
 - **Threshold optimism.** The 95 % recall floor is enforced on cross-fitted
   training predictions. It is a fitted quantity, and held-out recall may fall
   below it.
+- **Selection optimism.** The shipped model is the best of six on a score that
+  is then reported for it, so that score overstates expected performance. The
+  effect grows with the number of candidates and shrinks with the number of
+  stars; here there are six candidates and few dozen stars, so it is not
+  negligible. A fully unbiased estimate would require selecting inside each
+  outer fold, which this pipeline does not do.
 - **Very little headroom at this operating point.** Accepted candidates are
   predominantly `CONFIRMED`, so a rule that simply flagged every accepted
   candidate would already reach 100 % recall at a precision equal to the base

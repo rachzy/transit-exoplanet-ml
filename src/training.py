@@ -21,7 +21,7 @@ from .artifacts import (
     write_json,
     write_yaml,
 )
-from .config import BASE_LEARNERS, Config, load_config
+from .config import BASE_LEARNERS, SELECTION_STRATEGY_BEST, Config, load_config
 from .data import (
     Dataset,
     composite_strata,
@@ -46,9 +46,10 @@ from .stacking import (
     report_progress,
     reported_models,
     resolve_n_splits,
+    select_best_model,
 )
 
-BUNDLE_FORMAT_VERSION = 1
+BUNDLE_FORMAT_VERSION = 2
 BUNDLE_FILENAME = "model.joblib"
 
 POTENTIAL = "POTENTIAL"
@@ -56,8 +57,54 @@ UNLIKELY = "UNLIKELY"
 
 
 @dataclass
+class SelectionRecord:
+    """Why a particular model was chosen to ship."""
+
+    selected_model: str
+    strategy: str
+    metric: str
+    score_source: str
+    scores: dict[str, float]
+    candidates: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "selected_model": self.selected_model,
+            "strategy": self.strategy,
+            "metric": self.metric,
+            "score_source": self.score_source,
+            "candidates": list(self.candidates),
+            "scores": self.scores,
+            "runner_up": self.runner_up,
+            "margin": self.margin,
+        }
+
+    @property
+    def ranked(self) -> list[tuple[str, float]]:
+        usable = [(n, s) for n, s in self.scores.items() if not np.isnan(s)]
+        return sorted(usable, key=lambda item: -item[1])
+
+    @property
+    def runner_up(self) -> str | None:
+        others = [n for n, _ in self.ranked if n != self.selected_model]
+        return others[0] if others else None
+
+    @property
+    def margin(self) -> float | None:
+        """How far the winner beat the next-best candidate."""
+        runner_up = self.runner_up
+        if runner_up is None:
+            return None
+        return float(self.scores[self.selected_model] - self.scores[runner_up])
+
+
+@dataclass
 class ModelBundle:
-    """A trained stack plus everything needed to reproduce and audit it."""
+    """A trained model plus everything needed to reproduce and audit it.
+
+    Every candidate is fitted and retained; ``selection`` records which one is
+    served by :meth:`predict_proba` and why.
+    """
 
     run_id: str
     created_at: str
@@ -71,11 +118,17 @@ class ModelBundle:
     file_checksums: dict[str, str]
     provenance: dict[str, Any]
     n_oof_folds: int
+    selection: SelectionRecord
     bundle_format_version: int = BUNDLE_FORMAT_VERSION
 
     @property
     def threshold(self) -> float:
         return float(self.stack.threshold)
+
+    @property
+    def selected_model(self) -> str:
+        """The model that produces ``potential_probability``."""
+        return self.stack.selected_model
 
     @property
     def feature_names(self) -> tuple[str, ...]:
@@ -115,6 +168,7 @@ class ModelBundle:
                 "file_checksums": self.file_checksums,
                 "provenance": self.provenance,
                 "n_oof_folds": self.n_oof_folds,
+                "selection": self.selection,
             },
             target,
             compress=3,
@@ -174,6 +228,7 @@ class ModelBundle:
             file_checksums=dict(payload["file_checksums"]),
             provenance=payload["provenance"],
             n_oof_folds=int(payload["n_oof_folds"]),
+            selection=payload["selection"],
             bundle_format_version=found,
         )
 
@@ -213,9 +268,13 @@ def _training_oof_frame(fit: StackFitResult, dataset: Dataset) -> pd.DataFrame:
     for name in BASE_LEARNERS:
         frame[f"prob_{name}"] = probabilities[name]
     frame["prob_probability_average"] = probabilities[BASELINE_AVERAGE]
-    frame["potential_probability"] = probabilities[STACK]
+    frame["prob_stack"] = probabilities[STACK]
+
+    selected = fit.stack.selected_model
+    frame["model_name"] = selected
+    frame["potential_probability"] = probabilities[selected]
     frame["decision_threshold"] = fit.threshold
-    flagged = accepted & (probabilities[STACK] >= fit.threshold)
+    flagged = accepted & (probabilities[selected] >= fit.threshold)
     frame["prediction"] = np.where(
         ~accepted, "", np.where(flagged, POTENTIAL, UNLIKELY)
     )
@@ -246,22 +305,84 @@ def _training_report(
             ),
         }
 
-    stack_probability = probabilities[STACK][rows]
-    decision = (stack_probability >= fit.threshold).astype(int)
-    recall = per_model[STACK]["crossfit_metrics"]["recall"]
+    selected = fit.stack.selected_model
+    selected_probability = probabilities[selected][rows]
+    decision = (selected_probability >= fit.threshold).astype(int)
+    recall = per_model[selected]["crossfit_metrics"]["recall"]
     floor = config.min_recall
 
     return {
         "dataset": dataset.summary(),
         "n_oof_folds": fit.n_inner_folds,
+        "selected_model": selected,
         "recall_floor": floor,
         "recall_floor_met": bool(not np.isnan(recall) and recall >= floor - 1e-12),
         "saved_threshold": fit.threshold,
         "models": per_model,
         "best_params": fit.best_params,
-        "per_star": per_star_summary(groups[rows], y[rows], stack_probability, decision),
+        "per_star": per_star_summary(groups[rows], y[rows], selected_probability, decision),
         "n_crossfit_rows": int(rows.size),
     }
+
+
+def _crossfit_scores(
+    fit: StackFitResult, dataset: Dataset, config: Config, metric: str
+) -> dict[str, float]:
+    """Selection scores from the training set's own cross-fitted predictions."""
+    y, accepted = dataset.require_supervision()
+    groups = dataset.star_id
+    probabilities = fit.training_probabilities()
+    rows = np.flatnonzero(accepted & ~np.isnan(probabilities[STACK]))
+    weights = star_balanced_weights(groups[rows]) if config.weighted_metrics else None
+    return {
+        name: float(
+            compute_metrics(
+                y[rows], probabilities[name][rows], fit.thresholds[name].threshold, weights
+            ).get(metric, float("nan"))
+        )
+        for name in reported_models()
+    }
+
+
+def choose_model(
+    config: Config,
+    fit: StackFitResult,
+    dataset: Dataset,
+    evaluation: EvaluationResult | None,
+) -> SelectionRecord:
+    """Decide which fitted model ships.
+
+    With ``selection.strategy: best`` the highest scorer on the configured
+    metric wins. Scores come from the nested evaluation's pooled held-out
+    numbers when it was run -- the honest estimate -- and fall back to the
+    training set's own cross-fitted scores when it was skipped.
+    """
+    settings = config.selection
+    strategy = str(settings["strategy"])
+    metric = str(settings["metric"])
+    candidates = config.selection_candidates
+    preferred = str(settings["score_source"])
+
+    if preferred == "nested_evaluation" and evaluation is not None:
+        scores = evaluation.selection_scores(metric)
+        source = "nested_evaluation"
+    else:
+        scores = _crossfit_scores(fit, dataset, config, metric)
+        source = "crossfit"
+
+    selected = (
+        strategy
+        if strategy != SELECTION_STRATEGY_BEST
+        else select_best_model(scores, candidates)
+    )
+    return SelectionRecord(
+        selected_model=selected,
+        strategy=strategy,
+        metric=metric,
+        score_source=source,
+        scores=scores,
+        candidates=candidates,
+    )
 
 
 def train_model(
@@ -307,6 +428,14 @@ def train_model(
         progress=progress,
     )
 
+    selection = choose_model(config, fit, dataset, evaluation)
+    fit.stack = fit.stack.with_selection(selection.selected_model)
+    report_progress(
+        progress,
+        f"selected {selection.selected_model} by {selection.metric} "
+        f"({selection.score_source})",
+    )
+
     run_id = new_run_id()
     bundle = ModelBundle(
         run_id=run_id,
@@ -315,12 +444,13 @@ def train_model(
         schema=dataset.schema,
         config=config.to_dict(),
         stack=fit.stack,
-        threshold_choice=fit.thresholds[STACK],
+        threshold_choice=fit.thresholds[selection.selected_model],
         best_params=fit.best_params,
         train_stars=tuple(dataset.stars),
         file_checksums=dict(dataset.file_checksums),
         provenance=provenance(config.seed, run_id=run_id),
         n_oof_folds=n_folds,
+        selection=selection,
     )
     return TrainingRun(
         bundle=bundle,
@@ -385,10 +515,12 @@ def write_training_artifacts(
 
     written.append(write_yaml(directory / "config.resolved.yaml", bundle.config))
     written.append(write_yaml(directory / "feature_schema.yaml", bundle.schema.to_dict()))
+    written.append(write_json(directory / "selection.json", bundle.selection.to_dict()))
     written.append(
         write_json(
             directory / "threshold.json",
             {
+                "selected_model": bundle.selected_model,
                 "threshold": bundle.threshold,
                 "objective": bundle.config["objective"],
                 "selection": bundle.threshold_choice.to_dict(),
@@ -452,7 +584,8 @@ def write_training_artifacts(
 
 
 def _summary(run: TrainingRun) -> dict[str, Any]:
-    stack = run.report["models"][STACK]["crossfit_metrics"]
+    selection = run.bundle.selection
+    selected = run.report["models"][selection.selected_model]["crossfit_metrics"]
     payload: dict[str, Any] = {
         "run_id": run.bundle.run_id,
         "created_at": run.bundle.created_at,
@@ -460,19 +593,23 @@ def _summary(run: TrainingRun) -> dict[str, Any]:
         "schema_version": run.bundle.schema.schema_version,
         "n_train_stars": len(run.bundle.train_stars),
         "n_features": len(run.bundle.feature_names),
+        "selected_model": selection.selected_model,
+        "selection": selection.to_dict(),
         "threshold": run.bundle.threshold,
         "recall_floor": run.report["recall_floor"],
         "recall_floor_met": run.report["recall_floor_met"],
-        "crossfit_precision": stack["precision"],
-        "crossfit_recall": stack["recall"],
-        "crossfit_average_precision": stack["average_precision"],
+        "crossfit_precision": selected["precision"],
+        "crossfit_recall": selected["recall"],
+        "crossfit_average_precision": selected["average_precision"],
         "best_params": run.bundle.best_params,
     }
     if run.evaluation is not None:
         pooled = run.evaluation.pooled_metrics
         payload["nested_evaluation"] = {
             "n_outer_folds": run.evaluation.n_outer_folds,
-            "stack_meets_recall_floor": run.evaluation.stack_meets_recall_floor,
+            "selected_meets_recall_floor": run.evaluation.meets_recall_floor(
+                selection.selected_model
+            ),
             "models": {
                 name: {
                     "precision": pooled[name]["precision"],
@@ -483,7 +620,7 @@ def _summary(run: TrainingRun) -> dict[str, Any]:
                 }
                 for name in reported_models()
             },
-            "production_model": STACK,
+            "production_model": selection.selected_model,
             "baseline": BASELINE_AVERAGE,
         }
     return payload

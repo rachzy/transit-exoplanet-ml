@@ -8,7 +8,7 @@ procedure that is saved.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -122,21 +122,57 @@ class FittedBase:
 
 @dataclass
 class FittedStack:
-    """Four fitted base learners plus the logistic meta-model above them."""
+    """Every candidate model, plus a record of which one ships.
+
+    The four base learners and the logistic meta-model above them are always
+    fitted, so all six candidates -- the stack, each base learner, and their
+    unweighted average -- can be scored and compared. ``selected_model`` names
+    the one that :meth:`predict_proba` actually serves; the others are retained
+    so a run can be re-examined, or the selection revisited, without refitting.
+    """
 
     bases: dict[str, FittedBase]
     meta: LogisticRegression
-    threshold: float
+    thresholds: dict[str, float]
+    selected_model: str
     feature_names: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.selected_model not in self.thresholds:
+            raise ValueError(
+                f"No threshold for selected model {self.selected_model!r}; "
+                f"have {sorted(self.thresholds)}."
+            )
+
+    @property
+    def threshold(self) -> float:
+        """The recall-floor threshold belonging to the selected model."""
+        return float(self.thresholds[self.selected_model])
 
     def base_matrix(self, X: np.ndarray) -> np.ndarray:
         return np.column_stack([self.bases[name].predict_proba(X) for name in BASE_LEARNERS])
 
+    def all_probabilities(self, X: np.ndarray) -> dict[str, np.ndarray]:
+        """Probabilities from every candidate model, keyed by name."""
+        base = self.base_matrix(X)
+        out: dict[str, np.ndarray] = {
+            STACK: np.asarray(self.meta.predict_proba(base))[:, 1],
+            BASELINE_AVERAGE: base.mean(axis=1),
+        }
+        for column, learner in enumerate(BASE_LEARNERS):
+            out[learner] = base[:, column]
+        return out
+
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        return np.asarray(self.meta.predict_proba(self.base_matrix(X)))[:, 1]
+        """Probabilities from the selected model only."""
+        return self.all_probabilities(X)[self.selected_model]
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         return self.predict_proba(X) >= self.threshold
+
+    def with_selection(self, model: str) -> FittedStack:
+        """A copy of this stack serving ``model`` instead."""
+        return replace(self, selected_model=model)
 
 
 def fit_base(
@@ -327,7 +363,8 @@ class StackFitResult:
 
     @property
     def threshold(self) -> float:
-        return self.thresholds[STACK].threshold
+        """Threshold of whichever model this fit selected."""
+        return self.thresholds[self.stack.selected_model].threshold
 
     def training_probabilities(self) -> dict[str, np.ndarray]:
         """Cross-fitted training-side probabilities, per reported model."""
@@ -340,18 +377,37 @@ class StackFitResult:
 
 def model_probabilities(result: StackFitResult, X: np.ndarray) -> dict[str, np.ndarray]:
     """Probabilities from the stack, each base learner, and the mean baseline."""
-    base = result.stack.base_matrix(X)
-    out: dict[str, np.ndarray] = {
-        STACK: np.asarray(result.stack.meta.predict_proba(base))[:, 1]
-    }
-    for column, learner in enumerate(BASE_LEARNERS):
-        out[learner] = base[:, column]
-    out[BASELINE_AVERAGE] = base.mean(axis=1)
-    return out
+    return result.stack.all_probabilities(X)
 
 
 def reported_models() -> tuple[str, ...]:
+    """Every candidate, in the order that breaks selection ties."""
     return (STACK, *BASE_LEARNERS, BASELINE_AVERAGE)
+
+
+def select_best_model(
+    scores: dict[str, float],
+    candidates: Sequence[str] | None = None,
+) -> str:
+    """Name the highest-scoring candidate, breaking ties deterministically.
+
+    Ties fall to whichever model comes first in :func:`reported_models`, which
+    puts the stack ahead of its own parts. Candidates that could not be scored
+    (NaN) are skipped.
+    """
+    order = [name for name in reported_models() if candidates is None or name in candidates]
+    scored = [
+        (name, scores[name])
+        for name in order
+        if name in scores and not np.isnan(scores[name])
+    ]
+    if not scored:
+        raise DataDiversityError(
+            "No candidate model could be scored for selection. This needs accepted "
+            "candidates of both classes in the held-out folds."
+        )
+    best = max(scored, key=lambda item: (item[1], -order.index(item[0])))
+    return best[0]
 
 
 def fit_stack(
@@ -412,7 +468,10 @@ def fit_stack(
     stack = FittedStack(
         bases=bases,
         meta=meta,
-        threshold=thresholds[STACK].threshold,
+        thresholds={name: choice.threshold for name, choice in thresholds.items()},
+        # Provisional: the caller selects the shipping model once it has scores
+        # to compare. Evaluation folds never consult this field.
+        selected_model=STACK,
         feature_names=tuple(feature_names),
     )
     return StackFitResult(

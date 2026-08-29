@@ -11,6 +11,7 @@ from .config import BASE_LEARNERS
 from .data import Dataset, load_dataset
 from .errors import SchemaVersionError
 from .schema import FeatureSchema
+from .stacking import BASELINE_AVERAGE, STACK
 from .training import POTENTIAL, UNLIKELY, ModelBundle, load_model
 
 PROBABILITY_COLUMNS = tuple(f"prob_{name}" for name in BASE_LEARNERS)
@@ -20,9 +21,12 @@ ADDED_COLUMNS = (
     "star_id",
     "row_index",
     *PROBABILITY_COLUMNS,
+    "prob_stack",
+    "prob_probability_average",
     "potential_probability",
     "decision_threshold",
     "prediction",
+    "model_name",
     "model_run_id",
 )
 
@@ -62,15 +66,20 @@ def predict_dataset(
         )
 
     X = dataset.X
-    base = bundle.base_probabilities(X)
-    probabilities = bundle.predict_proba(X)
+    # Every candidate is scored so the output stays auditable; only the
+    # selected model's column feeds potential_probability and the decision.
+    candidates = bundle.stack.all_probabilities(X)
+    probabilities = candidates[bundle.selected_model]
 
     frame = dataset.frame.copy()
     for name in BASE_LEARNERS:
-        frame[f"prob_{name}"] = base[name]
+        frame[f"prob_{name}"] = candidates[name]
+    frame["prob_stack"] = candidates[STACK]
+    frame["prob_probability_average"] = candidates[BASELINE_AVERAGE]
     frame["potential_probability"] = probabilities
     frame["decision_threshold"] = bundle.threshold
     frame["prediction"] = np.where(probabilities >= bundle.threshold, POTENTIAL, UNLIKELY)
+    frame["model_name"] = bundle.selected_model
     frame["model_run_id"] = bundle.run_id
 
     frame = frame.sort_values(["source_file", "row_index"], kind="stable").reset_index(drop=True)

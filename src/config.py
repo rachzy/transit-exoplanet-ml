@@ -16,6 +16,10 @@ DEFAULT_CONFIG_RESOURCE = "config.yaml"
 
 BASE_LEARNERS: tuple[str, ...] = ("lightgbm", "extra_trees", "svm_rbf", "logistic_regression")
 
+# Every model that can be reported and shipped. Defined here (rather than in
+# `stacking`) so config validation does not import the modelling stack.
+ALL_MODELS: tuple[str, ...] = ("stack", *BASE_LEARNERS, "probability_average")
+
 
 @dataclass(frozen=True)
 class Config:
@@ -44,6 +48,14 @@ class Config:
     @property
     def cv(self) -> dict[str, Any]:
         return self.data["cv"]
+
+    @property
+    def selection(self) -> dict[str, Any]:
+        return self.data["selection"]
+
+    @property
+    def selection_candidates(self) -> tuple[str, ...]:
+        return tuple(self.selection["candidates"])
 
     @property
     def meta(self) -> dict[str, Any]:
@@ -112,14 +124,39 @@ def load_config(path: str | Path | None = None, overrides: dict[str, Any] | None
     return config
 
 
+SELECTION_STRATEGY_BEST = "best"
+SELECTION_SOURCES = ("nested_evaluation", "crossfit")
+
+
 def _validate(config: Config) -> None:
     data = config.data
-    for key in ("seed", "objective", "cv", "models", "meta"):
+    for key in ("seed", "objective", "selection", "cv", "models", "meta"):
         if key not in data:
             raise ConfigError(f"Config is missing required section {key!r}.")
 
     if not 0.0 < config.min_recall <= 1.0:
         raise ConfigError(f"objective.min_recall must be in (0, 1]; got {config.min_recall}.")
+
+    selection = config.selection
+    candidates = selection.get("candidates") or []
+    if not candidates:
+        raise ConfigError("selection.candidates must list at least one model.")
+    unknown = [c for c in candidates if c not in ALL_MODELS]
+    if unknown:
+        raise ConfigError(
+            f"selection.candidates names unknown models {unknown}; known: {list(ALL_MODELS)}."
+        )
+    strategy = selection.get("strategy")
+    if strategy != SELECTION_STRATEGY_BEST and strategy not in candidates:
+        raise ConfigError(
+            f"selection.strategy must be {SELECTION_STRATEGY_BEST!r} or one of the "
+            f"configured candidates {list(candidates)}; got {strategy!r}."
+        )
+    source = selection.get("score_source")
+    if source not in SELECTION_SOURCES:
+        raise ConfigError(
+            f"selection.score_source must be one of {list(SELECTION_SOURCES)}; got {source!r}."
+        )
 
     cv = config.cv
     for key in ("outer_folds", "inner_folds", "min_outer_folds", "min_inner_folds"):

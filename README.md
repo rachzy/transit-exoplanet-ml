@@ -1,9 +1,9 @@
 # transit-exoplanet-ml
 
 A reproducible screening model for transit exoplanet candidates. It validates
-processed per-star candidate tables, evaluates a star-grouped stacked
-classifier with nested cross-validation, trains the production stack, and
-writes one consolidated prediction CSV.
+processed per-star candidate tables, compares six star-grouped classifiers under
+nested cross-validation, trains and ships the best-scoring one, and writes one
+consolidated prediction CSV.
 
 > **`potential_probability` is a screening score learned from
 > literature-derived labels. It is not scientific confirmation.** A `POTENTIAL`
@@ -72,7 +72,7 @@ uv run exoplanet-ml validate --mode predict --data-dir data/processed/test
 # 2. Nested, star-grouped evaluation
 uv run exoplanet-ml evaluate --data-dir data/processed/train --output-dir reports/nested-cv
 
-# 3. Train the production stack into an immutable run directory
+# 3. Train every candidate, ship the best, into an immutable run directory
 uv run exoplanet-ml train --data-dir data/processed/train --artifact-dir models
 
 # 4. Score unseen stars
@@ -96,8 +96,12 @@ under `evaluation/` inside the run directory.
 The CSV keeps every original candidate column and appends:
 
 `source_file`, `star_id`, `row_index`, `prob_lightgbm`, `prob_extra_trees`,
-`prob_svm_rbf`, `prob_logistic_regression`, `potential_probability`,
-`decision_threshold`, `prediction` (`POTENTIAL` / `UNLIKELY`), `model_run_id`.
+`prob_svm_rbf`, `prob_logistic_regression`, `prob_stack`,
+`prob_probability_average`, `potential_probability`, `decision_threshold`,
+`prediction` (`POTENTIAL` / `UNLIKELY`), `model_name`, `model_run_id`.
+
+Every candidate is scored, so the output is auditable; `model_name` says which
+one produced `potential_probability` and the decision.
 
 Rows are ordered by source file then by their position within that file, so the
 output is byte-stable across runs.
@@ -118,10 +122,30 @@ frame   = predict_dataset(run.bundle, data_dir="data/processed/test")
 
 ## Modeling
 
-**The production model is always the LightGBM + ExtraTrees + RBF SVM +
-logistic-regression stack with an L2 logistic meta-model**, even when a simpler
-comparator scores higher. The `evaluate` and `train` commands print a warning
-naming any comparator that beats the stack, and the artifact records it.
+Six candidates are fitted on every run: the LightGBM + ExtraTrees + RBF SVM +
+logistic-regression **stack** with an L2 logistic meta-model, each of the four
+**base learners** on its own, and their unweighted **probability average**.
+
+**The candidate with the highest average precision ships.** `train` ranks them,
+serves the winner from `predict`, and records the full ranking in
+`selection.json`. All six stay in the bundle, so a run can be re-examined -- or
+the selection revisited -- without refitting.
+
+Selection is configurable under `selection` in the config:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `strategy` | `best` | `best` picks the top scorer; naming a model (e.g. `stack`) pins it |
+| `metric` | `average_precision` | the score models are ranked on |
+| `score_source` | `nested_evaluation` | pooled held-out scores, falling back to cross-fitted training scores when evaluation is skipped |
+| `candidates` | all six | which models may be chosen; ties fall to the first listed |
+
+> **Selection caveat.** The winner is chosen on the same held-out score that is
+> then reported for it. Taking the best of six correlated estimates biases that
+> score upward, so treat the shipped model's headline number as optimistic. When
+> the winning margin is small relative to the bootstrap intervals -- which it
+> often is on a few dozen stars -- the ranking is not stable, and both `evaluate`
+> and `train` say so explicitly.
 
 Each base learner gets its own preprocessing, all of it fitted inside the fold
 that uses it and persisted with the bundle:
@@ -175,6 +199,7 @@ Every training run writes an immutable `models/<run-id>/` directory:
 model.joblib                    serialized stack + every fitted pipeline
 config.resolved.yaml            the configuration exactly as applied
 feature_schema.yaml             the feature schema, with its version
+selection.json                  the ranking, the winner, and the margin
 threshold.json                  saved threshold and each comparator's
 training_report.json            cross-fitted metrics and the recall-floor check
 tuning.json                     every candidate scored, per learner

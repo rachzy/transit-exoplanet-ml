@@ -34,6 +34,7 @@ from .stacking import (
     report_progress,
     reported_models,
     resolve_n_splits,
+    select_best_model,
 )
 
 
@@ -57,12 +58,35 @@ class EvaluationResult:
 
     @property
     def stack_meets_recall_floor(self) -> bool:
+        return self.meets_recall_floor(STACK)
+
+    def meets_recall_floor(self, model: str) -> bool:
+        """Whether ``model`` held the recall floor on held-out stars."""
         floor = float(self.config.get("objective", {}).get("min_recall", 0.95))
-        recall = self.pooled_metrics[STACK]["recall"]
+        recall = self.pooled_metrics[model]["recall"]
         return bool(not np.isnan(recall) and recall >= floor - 1e-12)
+
+    def selection_scores(self, metric: str = "average_precision") -> dict[str, float]:
+        """Pooled held-out score per model, the basis for choosing what ships."""
+        return {
+            name: float(pooled.get(metric, float("nan")))
+            for name, pooled in self.pooled_metrics.items()
+        }
+
+    def would_ship(self) -> str:
+        """The model `train` would select from these results."""
+        selection = self.config.get("selection", {})
+        strategy = selection.get("strategy", "best")
+        candidates = tuple(selection.get("candidates", reported_models()))
+        if strategy != "best":
+            return strategy
+        return select_best_model(
+            self.selection_scores(selection.get("metric", "average_precision")), candidates
+        )
 
     def comparison_table(self) -> pd.DataFrame:
         """One row per reported model, ordered with the stack first."""
+        selected = self.would_ship()
         rows = []
         for name in reported_models():
             pooled = self.pooled_metrics[name]
@@ -70,7 +94,7 @@ class EvaluationResult:
             rows.append(
                 {
                     "model": name,
-                    "is_production": name == STACK,
+                    "is_production": name == selected,
                     "precision": pooled["precision"],
                     "precision_lo": ci.get("precision", {}).get("lower", float("nan")),
                     "precision_hi": ci.get("precision", {}).get("upper", float("nan")),
@@ -93,15 +117,21 @@ class EvaluationResult:
             )
         return pd.DataFrame(rows)
 
-    def importance_summary(self) -> pd.DataFrame:
-        """Permutation importance aggregated over folds and repeats."""
+    def importance_summary(self, model: str | None = None) -> pd.DataFrame:
+        """Permutation importance for one model, aggregated over folds and repeats.
+
+        Defaults to the model that would ship, since that is the one whose
+        feature reliance actually matters.
+        """
         if self.permutation_importance.empty:
             return pd.DataFrame(columns=["feature", "importance_mean", "importance_std"])
-        grouped = self.permutation_importance.groupby("feature")["importance"]
+        frame = self.permutation_importance
+        frame = frame[frame["model"] == (model or self.would_ship())]
+        if frame.empty:
+            return pd.DataFrame(columns=["feature", "importance_mean", "importance_std"])
+        grouped = frame.groupby("feature")["importance"]
         fold_means = (
-            self.permutation_importance.groupby(["feature", "outer_fold"])["importance"]
-            .mean()
-            .groupby("feature")
+            frame.groupby(["feature", "outer_fold"])["importance"].mean().groupby("feature")
         )
         summary = pd.DataFrame(
             {
@@ -121,6 +151,8 @@ class EvaluationResult:
             "inner_folds_per_outer": self.inner_folds_per_outer,
             "dataset": self.dataset_summary,
             "config": self.config,
+            "would_ship": self.would_ship(),
+            "selected_meets_recall_floor": self.meets_recall_floor(self.would_ship()),
             "stack_meets_recall_floor": self.stack_meets_recall_floor,
             "pooled_metrics": self.pooled_metrics,
             "fold_metrics": self.fold_metrics,
@@ -151,12 +183,22 @@ def _permutation_importance(
 
     weights = star_balanced_weights(groups[rows]) if config.weighted_metrics else None
 
-    def score(matrix: np.ndarray) -> float:
-        probabilities = result.stack.predict_proba(matrix)
-        return accepted_average_precision(y[rows], probabilities[rows], sample_weight=weights)
+    def score(matrix: np.ndarray) -> dict[str, float]:
+        """Accepted-candidate AP for every candidate model.
+
+        All six share one pass of base-learner predictions, so scoring them
+        together costs little more than scoring one.
+        """
+        probabilities = result.stack.all_probabilities(matrix)
+        return {
+            model: accepted_average_precision(
+                y[rows], values[rows], sample_weight=weights
+            )
+            for model, values in probabilities.items()
+        }
 
     baseline = score(X)
-    if np.isnan(baseline):
+    if all(np.isnan(value) for value in baseline.values()):
         return []
 
     rng = np.random.default_rng(config.seed + fold)
@@ -166,16 +208,18 @@ def _permutation_importance(
             shuffled = X.copy()
             shuffled[:, column] = X[rng.permutation(X.shape[0]), column]
             permuted = score(shuffled)
-            records.append(
-                {
-                    "outer_fold": fold,
-                    "feature": name,
-                    "repeat": repeat,
-                    "baseline_score": float(baseline),
-                    "permuted_score": float(permuted),
-                    "importance": float(baseline - permuted),
-                }
-            )
+            for model, base_score in baseline.items():
+                records.append(
+                    {
+                        "outer_fold": fold,
+                        "model": model,
+                        "feature": name,
+                        "repeat": repeat,
+                        "baseline_score": float(base_score),
+                        "permuted_score": float(permuted[model]),
+                        "importance": float(base_score - permuted[model]),
+                    }
+                )
     return records
 
 
@@ -352,6 +396,7 @@ def evaluate_dataset(
             importance_records,
             columns=[
                 "outer_fold",
+                "model",
                 "feature",
                 "repeat",
                 "baseline_score",

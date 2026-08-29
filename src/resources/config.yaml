@@ -11,6 +11,24 @@ objective:
   # Weight tuning/reporting metrics by the same equal-star weights used to fit.
   weighted_metrics: true
 
+selection:
+  # Which model ships. `best` picks the highest scorer on `metric`; naming a
+  # candidate instead pins it regardless of score (e.g. `stack`).
+  strategy: best
+  metric: average_precision
+  # Where the selection score comes from. `nested_evaluation` uses the pooled
+  # held-out score across outer folds and is the honest estimate; it falls back
+  # to `crossfit` when the nested evaluation was skipped.
+  score_source: nested_evaluation
+  # Candidates considered. Ties fall to the earliest entry here.
+  candidates:
+    - stack
+    - lightgbm
+    - extra_trees
+    - svm_rbf
+    - logistic_regression
+    - probability_average
+
 weighting:
   # Every star contributes the same total weight to any fit it takes part in.
   # Weights are recomputed within each fitting subset so the property also holds

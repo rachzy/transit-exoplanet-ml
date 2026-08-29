@@ -14,7 +14,7 @@ from src.errors import SchemaVersionError
 from src.evaluate import evaluate_dataset
 from src.predict import ADDED_COLUMNS, predict_dataset
 from src.schema import load_schema
-from src.stacking import STACK, reported_models
+from src.stacking import reported_models
 from src.training import (
     POTENTIAL,
     UNLIKELY,
@@ -80,10 +80,17 @@ def test_permutation_importance_comes_from_held_out_folds_only(evaluation):
     assert set(frame["feature"]) == set(load_schema().feature_columns)
 
 
-def test_comparison_table_marks_the_production_stack(evaluation):
+def test_comparison_table_marks_the_model_that_would_ship(evaluation):
     table = evaluation.comparison_table()
-    assert table.loc[table["is_production"], "model"].tolist() == [STACK]
+    shipped = table.loc[table["is_production"], "model"].tolist()
+    assert shipped == [evaluation.would_ship()]
     assert len(table) == len(reported_models())
+
+
+def test_would_ship_is_the_highest_average_precision(evaluation):
+    scores = evaluation.selection_scores("average_precision")
+    best = max(scores.values())
+    assert scores[evaluation.would_ship()] == pytest.approx(best)
 
 
 def test_evaluation_result_is_json_serialisable(evaluation, tmp_path):
@@ -163,7 +170,8 @@ def test_rerunning_into_a_populated_directory_is_refused(trained, fast_config):
 def test_training_meets_the_recall_floor(trained, fast_config):
     report = trained.report
     assert report["recall_floor"] == pytest.approx(fast_config.min_recall)
-    assert report["recall_floor_met"], report["models"][STACK]["crossfit_metrics"]
+    selected = trained.bundle.selected_model
+    assert report["recall_floor_met"], report["models"][selected]["crossfit_metrics"]
 
 
 def test_training_oof_frame_labels_accepted_rows_only(trained):
