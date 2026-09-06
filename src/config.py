@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
@@ -18,7 +19,7 @@ BASE_LEARNERS: tuple[str, ...] = ("lightgbm", "extra_trees", "svm_rbf", "logisti
 
 # Every model that can be reported and shipped. Defined here (rather than in
 # `stacking`) so config validation does not import the modelling stack.
-ALL_MODELS: tuple[str, ...] = ("stack", *BASE_LEARNERS, "probability_average")
+ALL_MODELS: tuple[str, ...] = ("stack", *BASE_LEARNERS)
 
 
 @dataclass(frozen=True)
@@ -38,12 +39,15 @@ class Config:
         return int(self.data["seed"])
 
     @property
-    def min_recall(self) -> float:
-        return float(self.data["objective"]["min_recall"])
-
-    @property
     def weighted_metrics(self) -> bool:
         return bool(self.data["objective"].get("weighted_metrics", True))
+
+    @property
+    def accepted_candidate_multiplier(self) -> float:
+        """Relative base-learner weight of accepted versus other candidates."""
+        return float(
+            self.data.get("weighting", {}).get("accepted_candidate_multiplier", 1.0)
+        )
 
     @property
     def cv(self) -> dict[str, Any]:
@@ -134,8 +138,19 @@ def _validate(config: Config) -> None:
         if key not in data:
             raise ConfigError(f"Config is missing required section {key!r}.")
 
-    if not 0.0 < config.min_recall <= 1.0:
-        raise ConfigError(f"objective.min_recall must be in (0, 1]; got {config.min_recall}.")
+    multiplier = config.accepted_candidate_multiplier
+    if not math.isfinite(multiplier) or multiplier <= 0.0:
+        raise ConfigError(
+            "weighting.accepted_candidate_multiplier must be a positive finite "
+            f"number; got {multiplier}."
+        )
+
+    objective_metric = config.data["objective"].get("metric")
+    if objective_metric != "precision":
+        raise ConfigError(
+            "objective.metric must be 'precision'; "
+            f"got {objective_metric!r}."
+        )
 
     selection = config.selection
     candidates = selection.get("candidates") or []

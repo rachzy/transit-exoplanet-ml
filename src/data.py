@@ -83,18 +83,35 @@ def composite_strata(y: np.ndarray, accepted: np.ndarray) -> np.ndarray:
     return (np.asarray(y, dtype=int) * 2 + np.asarray(accepted, dtype=int)).astype(int)
 
 
-def star_balanced_weights(star_ids: np.ndarray | pd.Series) -> np.ndarray:
+def star_balanced_weights(
+    star_ids: np.ndarray | pd.Series,
+    row_multipliers: np.ndarray | pd.Series | None = None,
+) -> np.ndarray:
     """Weights giving every star the same total, with a mean weight of 1.
 
     Recomputed for each fitting subset so the property holds for that fit --
     including the accepted-only meta-model fit, where stars contribute
-    different numbers of rows than they do to the base learners.
+    different numbers of rows than they do to the base learners. Optional row
+    multipliers change the relative weight of rows *within* each star while
+    preserving equal total weight across stars.
     """
     ids = np.asarray(star_ids)
     if ids.size == 0:
         return np.zeros(0, dtype=float)
-    unique, inverse, counts = np.unique(ids, return_inverse=True, return_counts=True)
-    weights = 1.0 / counts[inverse].astype(float)
+    if row_multipliers is None:
+        priorities = np.ones(ids.size, dtype=float)
+    else:
+        priorities = np.asarray(row_multipliers, dtype=float)
+        if priorities.shape != ids.shape:
+            raise ValueError(
+                f"Expected {ids.shape} row multipliers, got {priorities.shape}."
+            )
+        if not np.isfinite(priorities).all() or (priorities <= 0.0).any():
+            raise ValueError("Row multipliers must all be positive finite numbers.")
+
+    unique, inverse = np.unique(ids, return_inverse=True)
+    totals = np.bincount(inverse, weights=priorities)
+    weights = priorities / totals[inverse]
     return weights * (ids.size / float(len(unique)))
 
 

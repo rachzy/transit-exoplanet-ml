@@ -47,13 +47,11 @@ def _broadcast_thresholds(threshold: float | np.ndarray, n: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ThresholdChoice:
-    """The operating point picked under the recall floor."""
+    """The highest-precision operating point."""
 
     threshold: float
     precision: float
     recall: float
-    min_recall: float
-    achieved: bool
     n_candidates: int
 
     def to_dict(self) -> dict[str, Any]:
@@ -61,8 +59,6 @@ class ThresholdChoice:
             "threshold": float(self.threshold),
             "precision": float(self.precision),
             "recall": float(self.recall),
-            "min_recall": float(self.min_recall),
-            "recall_floor_met": bool(self.achieved),
             "n_candidate_thresholds": int(self.n_candidates),
         }
 
@@ -70,15 +66,13 @@ class ThresholdChoice:
 def select_threshold(
     y_true: np.ndarray,
     y_prob: np.ndarray,
-    min_recall: float,
     sample_weight: np.ndarray | None = None,
 ) -> ThresholdChoice:
-    """Highest-precision threshold that still reaches ``min_recall``.
+    """Choose the threshold with highest precision on the supplied candidates.
 
-    A row is flagged when ``probability >= threshold``. Among the thresholds
-    that satisfy the recall floor the most precise is chosen; ties are broken
-    towards higher recall and then towards the *lower* threshold, which is the
-    more inclusive choice for unseen data.
+    A row is flagged when ``probability >= threshold``. Precision ties resolve
+    toward higher recall, retaining as many true positives as possible without
+    increasing the false-positive proportion.
     """
     y = np.asarray(y_true, dtype=int)
     p = np.asarray(y_prob, dtype=float)
@@ -97,14 +91,8 @@ def select_threshold(
     recall = tp / positive
     precision = np.divide(tp, tp + fp, out=np.zeros_like(tp), where=(tp + fp) > 0)
 
-    feasible = np.flatnonzero(recall >= min_recall - EPS)
-    achieved = feasible.size > 0
-    if not achieved:
-        # Unreachable in practice: the lowest threshold flags everything.
-        feasible = np.arange(candidates.size)
-
     order = sorted(
-        feasible.tolist(),
+        range(candidates.size),
         key=lambda i: (-precision[i], -recall[i], candidates[i]),
     )
     best = order[0]
@@ -112,8 +100,6 @@ def select_threshold(
         threshold=float(candidates[best]),
         precision=float(precision[best]),
         recall=float(recall[best]),
-        min_recall=float(min_recall),
-        achieved=bool(achieved),
         n_candidates=int(candidates.size),
     )
 

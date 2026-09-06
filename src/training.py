@@ -37,7 +37,6 @@ from .metrics import (
 )
 from .schema import FeatureSchema, load_schema
 from .stacking import (
-    BASELINE_AVERAGE,
     STACK,
     FittedStack,
     Progress,
@@ -49,7 +48,7 @@ from .stacking import (
     select_best_model,
 )
 
-BUNDLE_FORMAT_VERSION = 2
+BUNDLE_FORMAT_VERSION = 3
 BUNDLE_FILENAME = "model.joblib"
 
 POTENTIAL = "POTENTIAL"
@@ -267,7 +266,6 @@ def _training_oof_frame(fit: StackFitResult, dataset: Dataset) -> pd.DataFrame:
     )
     for name in BASE_LEARNERS:
         frame[f"prob_{name}"] = probabilities[name]
-    frame["prob_probability_average"] = probabilities[BASELINE_AVERAGE]
     frame["prob_stack"] = probabilities[STACK]
 
     selected = fit.stack.selected_model
@@ -286,7 +284,7 @@ def _training_report(
     dataset: Dataset,
     config: Config,
 ) -> dict[str, Any]:
-    """Cross-fitted training diagnostics, including the recall-floor check."""
+    """Cross-fitted training diagnostics for the selected operating point."""
     y, accepted = dataset.require_supervision()
     groups = dataset.star_id
     probabilities = fit.training_probabilities()
@@ -308,15 +306,10 @@ def _training_report(
     selected = fit.stack.selected_model
     selected_probability = probabilities[selected][rows]
     decision = (selected_probability >= fit.threshold).astype(int)
-    recall = per_model[selected]["crossfit_metrics"]["recall"]
-    floor = config.min_recall
-
     return {
         "dataset": dataset.summary(),
         "n_oof_folds": fit.n_inner_folds,
         "selected_model": selected,
-        "recall_floor": floor,
-        "recall_floor_met": bool(not np.isnan(recall) and recall >= floor - 1e-12),
         "saved_threshold": fit.threshold,
         "models": per_model,
         "best_params": fit.best_params,
@@ -596,8 +589,6 @@ def _summary(run: TrainingRun) -> dict[str, Any]:
         "selected_model": selection.selected_model,
         "selection": selection.to_dict(),
         "threshold": run.bundle.threshold,
-        "recall_floor": run.report["recall_floor"],
-        "recall_floor_met": run.report["recall_floor_met"],
         "crossfit_precision": selected["precision"],
         "crossfit_recall": selected["recall"],
         "crossfit_average_precision": selected["average_precision"],
@@ -607,9 +598,6 @@ def _summary(run: TrainingRun) -> dict[str, Any]:
         pooled = run.evaluation.pooled_metrics
         payload["nested_evaluation"] = {
             "n_outer_folds": run.evaluation.n_outer_folds,
-            "selected_meets_recall_floor": run.evaluation.meets_recall_floor(
-                selection.selected_model
-            ),
             "models": {
                 name: {
                     "precision": pooled[name]["precision"],
@@ -621,6 +609,5 @@ def _summary(run: TrainingRun) -> dict[str, Any]:
                 for name in reported_models()
             },
             "production_model": selection.selected_model,
-            "baseline": BASELINE_AVERAGE,
         }
     return payload

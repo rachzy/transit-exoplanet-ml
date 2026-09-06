@@ -31,7 +31,8 @@ def test_packaged_config_declares_every_base_learner():
 def test_packaged_config_matches_the_plan():
     config = load_config()
     assert config.seed == 42
-    assert config.min_recall == pytest.approx(0.95)
+    assert config.data["objective"]["metric"] == "precision"
+    assert config.accepted_candidate_multiplier == pytest.approx(5.0)
     assert config.cv["outer_folds"] == 5
     assert config.cv["inner_folds"] == 3
     assert config.cv["min_outer_folds"] == 3
@@ -76,10 +77,18 @@ def test_missing_section_is_rejected(tmp_path, payload, section):
         load_config(_write(tmp_path, payload))
 
 
-@pytest.mark.parametrize("value", [0.0, -0.1, 1.5])
-def test_recall_floor_must_be_a_valid_proportion(tmp_path, payload, value):
-    payload["objective"]["min_recall"] = value
-    with pytest.raises(ConfigError, match="min_recall"):
+@pytest.mark.parametrize("value", [0.0, -1.0, float("inf")])
+def test_accepted_candidate_multiplier_must_be_positive_and_finite(
+    tmp_path, payload, value
+):
+    payload["weighting"]["accepted_candidate_multiplier"] = value
+    with pytest.raises(ConfigError, match="accepted_candidate_multiplier"):
+        load_config(_write(tmp_path, payload))
+
+
+def test_objective_metric_must_be_precision(tmp_path, payload):
+    payload["objective"]["metric"] = "average_precision"
+    with pytest.raises(ConfigError, match=r"objective\.metric"):
         load_config(_write(tmp_path, payload))
 
 

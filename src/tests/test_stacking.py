@@ -147,17 +147,17 @@ def test_rejected_rows_train_bases_but_never_the_meta_model(
     real_fit_meta = stacking.fit_meta
     real_select = stacking.select_threshold
 
-    def spy_fit_base(learner, params, X, y_, groups, config):
+    def spy_fit_base(learner, params, X, y_, accepted_, groups, config):
         base_fit_sizes.append(len(y_))
-        return real_fit_base(learner, params, X, y_, groups, config)
+        return real_fit_base(learner, params, X, y_, accepted_, groups, config)
 
     def spy_fit_meta(P, y_, groups, config):
         meta_fit_labels.append(np.asarray(y_).copy())
         return real_fit_meta(P, y_, groups, config)
 
-    def spy_select(y_, prob, min_recall, sample_weight=None):
+    def spy_select(y_, prob, sample_weight=None):
         threshold_labels.append(np.asarray(y_).copy())
-        return real_select(y_, prob, min_recall, sample_weight=sample_weight)
+        return real_select(y_, prob, sample_weight=sample_weight)
 
     monkeypatch.setattr(stacking, "fit_base", spy_fit_base)
     monkeypatch.setattr(stacking, "fit_meta", spy_fit_meta)
@@ -198,8 +198,7 @@ def test_threshold_is_derived_from_cross_fitted_accepted_rows(dataset, fast_conf
     assert not np.isnan(crossfit[accepted]).all()
 
     choice = result.thresholds[STACK]
-    assert choice.min_recall == pytest.approx(fast_config.min_recall)
-    assert choice.recall >= fast_config.min_recall - 1e-12
+    assert choice.precision == pytest.approx(1.0)
     assert result.stack.threshold == pytest.approx(choice.threshold)
 
 
@@ -209,8 +208,7 @@ def test_every_reported_model_gets_its_own_threshold(dataset, fast_config):
         dataset.X, y, accepted, dataset.star_id, fast_config, dataset.feature_names
     )
     assert set(result.thresholds) == set(stacking.reported_models())
-    for name, choice in result.thresholds.items():
-        assert choice.recall >= fast_config.min_recall - 1e-12, name
+    assert all(choice.precision > 0 for choice in result.thresholds.values())
 
 
 def test_base_out_of_fold_matrix_is_complete_and_probabilistic(dataset, fast_config):

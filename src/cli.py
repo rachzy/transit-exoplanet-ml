@@ -175,21 +175,6 @@ def evaluate(
     margin = ranked[0][1] - ranked[1][1] if len(ranked) > 1 else None
     _report_selection_bias(margin, len(resolved.selection_candidates))
 
-    floor = result.config["objective"]["min_recall"]
-    if result.meets_recall_floor(would_ship):
-        typer.secho(
-            f"{would_ship} meets the {floor:.0%} recall floor on held-out accepted "
-            "candidates.",
-            fg=typer.colors.GREEN,
-        )
-    else:
-        typer.secho(
-            f"WARNING: pooled held-out recall for {would_ship} "
-            f"({_fmt(result.pooled_metrics[would_ship]['recall'])}) is below the "
-            f"{floor:.0%} floor. The floor is enforced on cross-fitted training "
-            "predictions; held-out recall can fall short on unseen stars.",
-            fg=typer.colors.YELLOW,
-        )
     _echo(f"\nWrote {len(written)} files to {output_dir}")
 
 
@@ -270,15 +255,6 @@ def train(
         f"  cross-fitted       : precision {_fmt(selected['precision'])}, "
         f"recall {_fmt(selected['recall'])}, AP {_fmt(selected['average_precision'])}"
     )
-    if report["recall_floor_met"]:
-        typer.secho(
-            f"  recall floor       : met ({report['recall_floor']:.0%})", fg=typer.colors.GREEN
-        )
-    else:
-        typer.secho(
-            f"  recall floor       : NOT met ({report['recall_floor']:.0%})",
-            fg=typer.colors.RED,
-        )
     _echo(f"  artifacts          : {run.artifact_dir} ({len(run.written)} files)")
     _echo("")
     if selection.strategy == "best":

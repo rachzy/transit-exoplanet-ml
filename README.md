@@ -97,8 +97,8 @@ The CSV keeps every original candidate column and appends:
 
 `source_file`, `star_id`, `row_index`, `prob_lightgbm`, `prob_extra_trees`,
 `prob_svm_rbf`, `prob_logistic_regression`, `prob_stack`,
-`prob_probability_average`, `potential_probability`, `decision_threshold`,
-`prediction` (`POTENTIAL` / `UNLIKELY`), `model_name`, `model_run_id`.
+`potential_probability`, `decision_threshold`, `prediction` (`POTENTIAL` /
+`UNLIKELY`), `model_name`, `model_run_id`.
 
 Every candidate is scored, so the output is auditable; `model_name` says which
 one produced `potential_probability` and the decision.
@@ -122,13 +122,13 @@ frame   = predict_dataset(run.bundle, data_dir="data/processed/test")
 
 ## Modeling
 
-Six candidates are fitted on every run: the LightGBM + ExtraTrees + RBF SVM +
-logistic-regression **stack** with an L2 logistic meta-model, each of the four
-**base learners** on its own, and their unweighted **probability average**.
+Five candidates are fitted on every run: the LightGBM + ExtraTrees + RBF SVM +
+logistic-regression **stack** with an L2 logistic meta-model, and each of the
+four **base learners** on its own.
 
-**The candidate with the highest average precision ships.** `train` ranks them,
+**The candidate with the highest precision ships.** `train` ranks them,
 serves the winner from `predict`, and records the full ranking in
-`selection.json`. All six stay in the bundle, so a run can be re-examined -- or
+`selection.json`. All five stay in the bundle, so a run can be re-examined -- or
 the selection revisited -- without refitting.
 
 Selection is configurable under `selection` in the config:
@@ -136,9 +136,9 @@ Selection is configurable under `selection` in the config:
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `strategy` | `best` | `best` picks the top scorer; naming a model (e.g. `stack`) pins it |
-| `metric` | `average_precision` | the score models are ranked on |
+| `metric` | `precision` | precision at each model's selected threshold |
 | `score_source` | `nested_evaluation` | pooled held-out scores, falling back to cross-fitted training scores when evaluation is skipped |
-| `candidates` | all six | which models may be chosen; ties fall to the first listed |
+| `candidates` | all five | which models may be chosen; ties fall to the first listed |
 
 > **Selection caveat.** The winner is chosen on the same held-out score that is
 > then reported for it. Taking the best of six correlated estimates biases that
@@ -156,17 +156,17 @@ that uses it and persisted with the bundle:
 | ExtraTrees | drop fold-local degenerates → median imputation + missing indicators |
 | RBF SVM, logistic regression | the above, then robust scaling |
 
-Base learners train on **all** candidates, accepted and rejected. The
+Base learners train on **all** candidates, accepted and rejected. Accepted
+candidates receive 5x the within-star weight of other candidates, while every
+star still contributes the same total weight. The
 meta-model is fitted **only** on accepted candidates' out-of-fold base
 probabilities, and only the four probabilities reach it. No automatic class
-weighting is used beyond the equal-star weights; the high-recall objective is
-met by model selection and thresholding instead.
+weighting is used.
 
 ### Objective
 
-Pick the threshold with the greatest precision that still reaches **95 % recall**
-on cross-fitted **accepted** candidates. Ties resolve towards higher recall and
-then towards the lower (more inclusive) threshold.
+Pick the threshold with the greatest precision on cross-fitted **accepted**
+candidates. Ties resolve towards higher recall.
 
 Reported metrics and the tuning score use the same equal-star weights as the
 fits, so a star with many candidates does not dominate the numbers

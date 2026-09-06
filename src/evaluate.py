@@ -56,17 +56,7 @@ class EvaluationResult:
     dataset_summary: dict[str, Any] = field(default_factory=dict)
     config: dict[str, Any] = field(default_factory=dict)
 
-    @property
-    def stack_meets_recall_floor(self) -> bool:
-        return self.meets_recall_floor(STACK)
-
-    def meets_recall_floor(self, model: str) -> bool:
-        """Whether ``model`` held the recall floor on held-out stars."""
-        floor = float(self.config.get("objective", {}).get("min_recall", 0.95))
-        recall = self.pooled_metrics[model]["recall"]
-        return bool(not np.isnan(recall) and recall >= floor - 1e-12)
-
-    def selection_scores(self, metric: str = "average_precision") -> dict[str, float]:
+    def selection_scores(self, metric: str = "precision") -> dict[str, float]:
         """Pooled held-out score per model, the basis for choosing what ships."""
         return {
             name: float(pooled.get(metric, float("nan")))
@@ -81,7 +71,7 @@ class EvaluationResult:
         if strategy != "best":
             return strategy
         return select_best_model(
-            self.selection_scores(selection.get("metric", "average_precision")), candidates
+            self.selection_scores(selection.get("metric", "precision")), candidates
         )
 
     def comparison_table(self) -> pd.DataFrame:
@@ -152,8 +142,6 @@ class EvaluationResult:
             "dataset": self.dataset_summary,
             "config": self.config,
             "would_ship": self.would_ship(),
-            "selected_meets_recall_floor": self.meets_recall_floor(self.would_ship()),
-            "stack_meets_recall_floor": self.stack_meets_recall_floor,
             "pooled_metrics": self.pooled_metrics,
             "fold_metrics": self.fold_metrics,
             "fold_thresholds": self.fold_thresholds,

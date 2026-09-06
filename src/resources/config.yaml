@@ -1,72 +1,48 @@
-# Resolved configuration for the transit exoplanet stacking model.
 config_version: 1
 seed: 42
 
 objective:
-  # Screening objective: greatest precision subject to a recall floor, measured
-  # on cross-fitted predictions for accepted candidates only.
-  min_recall: 0.95
-  # Metric used for hyper-parameter selection (accepted candidates only).
-  tuning_metric: average_precision
-  # Weight tuning/reporting metrics by the same equal-star weights used to fit.
+  metric: precision
   weighted_metrics: true
 
 selection:
-  # Which model ships. `best` picks the highest scorer on `metric`; naming a
-  # candidate instead pins it regardless of score (e.g. `stack`).
   strategy: best
-  metric: average_precision
-  # Where the selection score comes from. `nested_evaluation` uses the pooled
-  # held-out score across outer folds and is the honest estimate; it falls back
-  # to `crossfit` when the nested evaluation was skipped.
+  metric: precision
   score_source: nested_evaluation
-  # Candidates considered. Ties fall to the earliest entry here.
   candidates:
     - stack
     - lightgbm
     - extra_trees
     - svm_rbf
     - logistic_regression
-    - probability_average
 
 weighting:
-  # Every star contributes the same total weight to any fit it takes part in.
-  # Weights are recomputed within each fitting subset so the property also holds
-  # for the accepted-only meta-model fit.
   scheme: equal_star
+  accepted_candidate_multiplier: 5.0
 
 cv:
   outer_folds: 5
   inner_folds: 3
   min_outer_folds: 3
   min_inner_folds: 2
-  # Folds used to build out-of-fold base probabilities for the final model.
   final_oof_folds: 3
   shuffle: true
 
 bootstrap:
-  # Star-level resampling for confidence intervals on reported metrics.
   n_resamples: 1000
   confidence_level: 0.95
 
 permutation_importance:
   n_repeats: 10
-  # Metric drop measured on held-out outer-fold stars (accepted candidates).
   metric: average_precision
 
 calibration:
   n_bins: 10
 
-# ---------------------------------------------------------------------------
-# Base learners. `n_candidates` caps how many combinations are evaluated; the
-# subset is drawn deterministically from `seed`.
-# ---------------------------------------------------------------------------
 models:
   logistic_regression:
     n_candidates: 6
     fixed:
-      # L2 is scikit-learn's default penalty; passing `penalty` explicitly is
-      # deprecated from scikit-learn 1.8, so the default is relied on instead.
       solver: lbfgs
       max_iter: 5000
       class_weight: null
@@ -79,8 +55,6 @@ models:
       kernel: rbf
       class_weight: null
       cache_size: 500
-    # SVC has no native probability output. `SVC(probability=True)` is deprecated
-    # from scikit-learn 1.9, so the same Platt scaling is applied explicitly.
     calibration:
       method: sigmoid
       cv: 5
@@ -120,15 +94,8 @@ models:
       reg_alpha: [0.0, 0.1, 1.0]
       reg_lambda: [0.0, 0.1, 1.0]
 
-# Meta-learner: fixed, un-tuned, and sees only the four base probabilities.
 meta:
-  # L2 by default, as above; fixed and never tuned.
   C: 0.1
   solver: lbfgs
   max_iter: 5000
   class_weight: null
-
-# Reported alongside the stack for comparison. The stack ships regardless.
-baselines:
-  - name: probability_average
-    kind: unweighted_mean

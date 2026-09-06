@@ -211,6 +211,18 @@ def test_star_weights_normalise_within_any_subset():
     assert pytest.approx(weights.mean()) == 1.0
 
 
+def test_row_multipliers_preserve_star_balance_and_emphasize_rows():
+    stars = np.array(["a", "a", "a", "b", "b"], dtype=object)
+    accepted = np.array([True, False, False, True, False])
+    multipliers = np.where(accepted, 5.0, 1.0)
+    weights = star_balanced_weights(stars, row_multipliers=multipliers)
+
+    assert weights[0] == pytest.approx(5.0 * weights[1])
+    assert weights[3] == pytest.approx(5.0 * weights[4])
+    assert weights[stars == "a"].sum() == pytest.approx(weights[stars == "b"].sum())
+    assert weights.mean() == pytest.approx(1.0)
+
+
 def test_star_weights_recomputed_for_the_accepted_subset(train_dir, schema):
     """The equal-star property must hold for the accepted-only meta fit too."""
     dataset = load_dataset(train_dir, mode="train", schema=schema)

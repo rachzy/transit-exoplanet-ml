@@ -143,7 +143,7 @@ def test_train_creates_a_run_directory_with_a_model(trained_dir):
     assert (trained_dir / "model.joblib").is_file()
     summary = json.loads((trained_dir / "summary.json").read_text())
     assert summary["run_id"] == trained_dir.name
-    assert summary["recall_floor_met"] is True
+    assert summary["crossfit_precision"] > 0
 
 
 def test_predict_writes_a_consolidated_csv(trained_dir, predict_dir, tmp_path):

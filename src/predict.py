@@ -11,7 +11,7 @@ from .config import BASE_LEARNERS
 from .data import Dataset, load_dataset
 from .errors import SchemaVersionError
 from .schema import FeatureSchema
-from .stacking import BASELINE_AVERAGE, STACK
+from .stacking import STACK
 from .training import POTENTIAL, UNLIKELY, ModelBundle, load_model
 
 PROBABILITY_COLUMNS = tuple(f"prob_{name}" for name in BASE_LEARNERS)
@@ -22,7 +22,6 @@ ADDED_COLUMNS = (
     "row_index",
     *PROBABILITY_COLUMNS,
     "prob_stack",
-    "prob_probability_average",
     "potential_probability",
     "decision_threshold",
     "prediction",
@@ -75,7 +74,6 @@ def predict_dataset(
     for name in BASE_LEARNERS:
         frame[f"prob_{name}"] = candidates[name]
     frame["prob_stack"] = candidates[STACK]
-    frame["prob_probability_average"] = candidates[BASELINE_AVERAGE]
     frame["potential_probability"] = probabilities
     frame["decision_threshold"] = bundle.threshold
     frame["prediction"] = np.where(probabilities >= bundle.threshold, POTENTIAL, UNLIKELY)

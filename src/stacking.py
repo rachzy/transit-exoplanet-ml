@@ -28,7 +28,6 @@ from .metrics import (
 from .models import build_estimator, build_meta_estimator, candidate_params
 from .preprocessing import build_preprocessor
 
-BASELINE_AVERAGE = "probability_average"
 STACK = "stack"
 
 Progress = Callable[[str], None] | None
@@ -125,8 +124,8 @@ class FittedStack:
     """Every candidate model, plus a record of which one ships.
 
     The four base learners and the logistic meta-model above them are always
-    fitted, so all six candidates -- the stack, each base learner, and their
-    unweighted average -- can be scored and compared. ``selected_model`` names
+    fitted, so all five candidates -- the stack and each base learner -- can
+    be scored and compared. ``selected_model`` names
     the one that :meth:`predict_proba` actually serves; the others are retained
     so a run can be re-examined, or the selection revisited, without refitting.
     """
@@ -156,8 +155,7 @@ class FittedStack:
         """Probabilities from every candidate model, keyed by name."""
         base = self.base_matrix(X)
         out: dict[str, np.ndarray] = {
-            STACK: np.asarray(self.meta.predict_proba(base))[:, 1],
-            BASELINE_AVERAGE: base.mean(axis=1),
+            STACK: np.asarray(self.meta.predict_proba(base))[:, 1]
         }
         for column, learner in enumerate(BASE_LEARNERS):
             out[learner] = base[:, column]
@@ -180,14 +178,19 @@ def fit_base(
     params: dict[str, Any],
     X: np.ndarray,
     y: np.ndarray,
+    accepted: np.ndarray,
     groups: np.ndarray,
     config: Config,
 ) -> FittedBase:
-    """Fit one base learner and its preprocessing on the given rows."""
+    """Fit a base learner on all rows, emphasizing accepted candidates."""
     preprocessor = build_preprocessor(learner)
     transformed = preprocessor.fit_transform(X)
     estimator = build_estimator(learner, params, config)
-    estimator.fit(transformed, y, sample_weight=star_balanced_weights(groups))
+    row_multipliers = np.where(
+        np.asarray(accepted, dtype=bool), config.accepted_candidate_multiplier, 1.0
+    )
+    weights = star_balanced_weights(groups, row_multipliers=row_multipliers)
+    estimator.fit(transformed, y, sample_weight=weights)
     return FittedBase(
         learner=learner, params=dict(params), preprocessor=preprocessor, estimator=estimator
     )
@@ -258,7 +261,9 @@ def tune_base_learner(
     for position, params in enumerate(grid):
         scores: list[float] = []
         for tr, va in splits:
-            fitted = fit_base(learner, params, X[tr], y[tr], groups[tr], config)
+            fitted = fit_base(
+                learner, params, X[tr], y[tr], accepted[tr], groups[tr], config
+            )
             prob = fitted.predict_proba(X[va])
             scores.append(_score_fold(y[va], prob, accepted[va], groups[va], weighted))
         valid = [s for s in scores if not np.isnan(s)]
@@ -300,6 +305,7 @@ def base_oof_matrix(
     best_params: dict[str, dict[str, Any]],
     X: np.ndarray,
     y: np.ndarray,
+    accepted: np.ndarray,
     groups: np.ndarray,
     splits: Sequence[Split],
     config: Config,
@@ -308,7 +314,15 @@ def base_oof_matrix(
     P = np.full((X.shape[0], len(BASE_LEARNERS)), np.nan, dtype=float)
     for tr, va in splits:
         for column, learner in enumerate(BASE_LEARNERS):
-            fitted = fit_base(learner, best_params[learner], X[tr], y[tr], groups[tr], config)
+            fitted = fit_base(
+                learner,
+                best_params[learner],
+                X[tr],
+                y[tr],
+                accepted[tr],
+                groups[tr],
+                config,
+            )
             P[va, column] = fitted.predict_proba(X[va])
     if np.isnan(P).any():
         missing = int(np.isnan(P).any(axis=1).sum())
@@ -371,7 +385,6 @@ class StackFitResult:
         out: dict[str, np.ndarray] = {STACK: self.meta_crossfit}
         for column, learner in enumerate(BASE_LEARNERS):
             out[learner] = self.base_oof[:, column]
-        out[BASELINE_AVERAGE] = self.base_oof.mean(axis=1)
         return out
 
 
@@ -382,7 +395,7 @@ def model_probabilities(result: StackFitResult, X: np.ndarray) -> dict[str, np.n
 
 def reported_models() -> tuple[str, ...]:
     """Every candidate, in the order that breaks selection ties."""
-    return (STACK, *BASE_LEARNERS, BASELINE_AVERAGE)
+    return (STACK, *BASE_LEARNERS)
 
 
 def select_best_model(
@@ -444,16 +457,14 @@ def fit_stack(
     best_params = {name: result.best_params for name, result in tuning.items()}
 
     report_progress(progress, "  building out-of-fold base probabilities")
-    base_oof = base_oof_matrix(best_params, X, y, groups, splits, config)
+    base_oof = base_oof_matrix(best_params, X, y, accepted, groups, splits, config)
 
     report_progress(progress, "  cross-fitting the meta-model")
     meta_crossfit = crossfit_meta_predictions(
         base_oof, y, accepted, groups, splits, config
     )
 
-    thresholds = _choose_thresholds(
-        base_oof, meta_crossfit, y, accepted, groups, config
-    )
+    thresholds = _choose_thresholds(base_oof, meta_crossfit, y, accepted, groups, config)
 
     report_progress(progress, "  refitting base learners and meta-model on the full training set")
     accepted_rows = np.flatnonzero(accepted)
@@ -461,7 +472,9 @@ def fit_stack(
         base_oof[accepted_rows], y[accepted_rows], groups[accepted_rows], config
     )
     bases = {
-        learner: fit_base(learner, best_params[learner], X, y, groups, config)
+        learner: fit_base(
+            learner, best_params[learner], X, y, accepted, groups, config
+        )
         for learner in BASE_LEARNERS
     }
 
@@ -494,7 +507,7 @@ def _choose_thresholds(
     groups: np.ndarray,
     config: Config,
 ) -> dict[str, ThresholdChoice]:
-    """One recall-floor threshold per reported model, from training rows only."""
+    """One precision-maximizing threshold per model, from training rows only."""
     usable = accepted & ~np.isnan(meta_crossfit)
     rows = np.flatnonzero(usable)
     if rows.size == 0 or np.unique(y[rows]).size < 2:
@@ -508,11 +521,7 @@ def _choose_thresholds(
     sources: dict[str, np.ndarray] = {STACK: meta_crossfit}
     for column, learner in enumerate(BASE_LEARNERS):
         sources[learner] = base_oof[:, column]
-    sources[BASELINE_AVERAGE] = base_oof.mean(axis=1)
-
     return {
-        name: select_threshold(
-            y[rows], probabilities[rows], config.min_recall, sample_weight=weights
-        )
+        name: select_threshold(y[rows], probabilities[rows], sample_weight=weights)
         for name, probabilities in sources.items()
     }

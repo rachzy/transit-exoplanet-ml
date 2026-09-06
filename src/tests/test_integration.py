@@ -167,11 +167,11 @@ def test_rerunning_into_a_populated_directory_is_refused(trained, fast_config):
         write_training_artifacts(trained, trained.artifact_dir.parent)
 
 
-def test_training_meets_the_recall_floor(trained, fast_config):
+def test_training_uses_the_precision_objective(trained):
     report = trained.report
-    assert report["recall_floor"] == pytest.approx(fast_config.min_recall)
     selected = trained.bundle.selected_model
-    assert report["recall_floor_met"], report["models"][selected]["crossfit_metrics"]
+    choice = report["models"][selected]["threshold_choice"]
+    assert choice["precision"] == pytest.approx(1.0)
 
 
 def test_training_oof_frame_labels_accepted_rows_only(trained):

@@ -8,7 +8,7 @@ import pytest
 from src.config import load_config
 from src.data import load_dataset
 from src.errors import ConfigError, DataDiversityError
-from src.stacking import BASELINE_AVERAGE, STACK, fit_stack, reported_models, select_best_model
+from src.stacking import STACK, fit_stack, reported_models, select_best_model
 from src.training import train_model
 
 
@@ -22,15 +22,8 @@ def test_picks_the_highest_scorer():
         "extra_trees": 0.85,
         "svm_rbf": 0.88,
         "logistic_regression": 0.70,
-        BASELINE_AVERAGE: 0.89,
     }
     assert select_best_model(scores) == "lightgbm"
-
-
-def test_the_baseline_can_win():
-    scores = dict.fromkeys(reported_models(), 0.5)
-    scores[BASELINE_AVERAGE] = 0.99
-    assert select_best_model(scores) == BASELINE_AVERAGE
 
 
 def test_ties_fall_to_the_earlier_candidate():
@@ -43,8 +36,8 @@ def test_ties_fall_to_the_earlier_candidate():
 
 
 def test_selection_is_restricted_to_the_candidate_list():
-    scores = {STACK: 0.5, "lightgbm": 0.99, BASELINE_AVERAGE: 0.7}
-    assert select_best_model(scores, [STACK, BASELINE_AVERAGE]) == BASELINE_AVERAGE
+    scores = {STACK: 0.5, "lightgbm": 0.99, "extra_trees": 0.7}
+    assert select_best_model(scores, [STACK, "extra_trees"]) == "extra_trees"
 
 
 def test_unscorable_candidates_are_skipped():
@@ -63,7 +56,7 @@ def test_no_scorable_candidate_is_an_error():
 def test_default_strategy_is_best():
     config = load_config()
     assert config.selection["strategy"] == "best"
-    assert config.selection["metric"] == "average_precision"
+    assert config.selection["metric"] == "precision"
     assert set(config.selection_candidates) == set(reported_models())
 
 
