@@ -1,0 +1,2 @@
+target,period_days,t0,duration_days,duration_hours,depth_mean_per_transit,planet_to_star_radius_ratio,impact_parameter,inclination,scaled_semi_major_axis,eccentricity,planet_radius_rjup,stellar_radius,max_ses,max_mes
+Kepler-22b,289.864067,2454966.69719,0.31520833333333337,7.565,0.0005291,0.024234,0.856,89.7,164.8,0.0,0.2087608172004639,0.886,22.129465,35.636192
