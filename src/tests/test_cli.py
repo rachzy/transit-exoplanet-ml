@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -91,13 +92,20 @@ def evaluate_output(train_dir, config_file, tmp_path_factory) -> Path:
         "--quiet",
     )
     assert result.exit_code == 0, result.stdout
-    return output
+    runs = [path for path in output.iterdir() if path.is_dir()]
+    assert len(runs) == 1
+    assert re.fullmatch(r"\d{8}T\d{6}Z-[0-9a-f]{8}", runs[0].name)
+    assert str(runs[0]) in result.stdout
+    assert "AP pooled" in result.stdout and "AP mean" in result.stdout
+    assert "Individual outer-fold AP" in result.stdout
+    return runs[0]
 
 
 def test_evaluate_writes_metrics_and_plots(evaluate_output):
     for name in (
         "metrics.json",
         "model_comparison.csv",
+        "fold_average_precision.csv",
         "oof_predictions.csv",
         "per_star.csv",
         "permutation_importance.csv",
@@ -107,6 +115,7 @@ def test_evaluate_writes_metrics_and_plots(evaluate_output):
         assert (evaluate_output / name).is_file(), name
     plots = sorted(p.name for p in (evaluate_output / "plots").glob("*.png"))
     assert plots == [
+        "average_precision.png",
         "calibration.png",
         "model_comparison.png",
         "permutation_importance.png",
@@ -120,6 +129,33 @@ def test_evaluate_metrics_are_readable(evaluate_output):
     payload = json.loads((evaluate_output / "metrics.json").read_text())
     assert payload["pooled_metrics"]["stack"]["n"] > 0
     assert payload["n_outer_folds"] >= 3
+    assert "fold_ap_summary" in payload
+    provenance = json.loads((evaluate_output / "provenance.json").read_text())
+    assert provenance["run_id"] == evaluate_output.name
+
+
+def test_repeated_evaluation_preserves_existing_reports(
+    train_dir, config_file, evaluate_output
+):
+    base = evaluate_output.parent
+    original = {p.relative_to(evaluate_output): p.read_bytes()
+                for p in evaluate_output.rglob("*") if p.is_file()}
+    # Reports from before timestamped directories also remain untouched.
+    legacy = base / "metrics.json"
+    legacy.write_text('{"legacy": true}\n')
+    result = run(
+        "evaluate", "--data-dir", str(train_dir), "--output-dir", str(base),
+        "--config", str(config_file), "--quiet",
+    )
+    assert result.exit_code == 0, result.stdout
+    runs = [p for p in base.iterdir() if p.is_dir()]
+    assert len(runs) == 2
+    assert legacy.read_text() == '{"legacy": true}\n'
+    for path, content in original.items():
+        assert (evaluate_output / path).read_bytes() == content
+    newest = next(p for p in runs if p != evaluate_output)
+    assert str(newest) in result.stdout
+    assert (newest / "metrics.json").is_file()
 
 
 @pytest.fixture(scope="module")

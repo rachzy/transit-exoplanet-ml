@@ -42,10 +42,11 @@ def test_degenerate_fold_keeps_one_column():
     assert dropper.support_.sum() == 1
 
 
-def test_lightgbm_pipeline_passes_missing_values_through():
+@pytest.mark.parametrize("learner", ["lightgbm", "catboost"])
+def test_native_missing_value_learners_pass_missing_values_through(learner):
     X = np.array([[1.0, np.nan], [2.0, 4.0]])
-    out = build_preprocessor("lightgbm").fit_transform(X)
-    assert np.isnan(out).any(), "LightGBM handles NaN natively; it must not be imputed"
+    out = build_preprocessor(learner).fit_transform(X)
+    assert np.isnan(out).any(), f"{learner} handles NaN natively; it must not be imputed"
     assert out.shape == X.shape
 
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import json
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -10,7 +12,7 @@ import pytest
 import yaml
 
 from src.data import load_dataset
-from src.errors import SchemaVersionError
+from src.errors import SchemaVersionError, TransitExoplanetMLError
 from src.evaluate import evaluate_dataset
 from src.predict import ADDED_COLUMNS, predict_dataset
 from src.schema import load_schema
@@ -20,6 +22,7 @@ from src.training import (
     ModelBundle,
     load_model,
     train_model,
+    write_evaluation_artifacts,
     write_training_artifacts,
 )
 
@@ -110,6 +113,72 @@ def test_evaluation_result_is_json_serialisable(evaluation, tmp_path):
     assert payload["n_outer_folds"] == evaluation.n_outer_folds
 
 
+@pytest.mark.parametrize(
+    ("scores", "expected_mean", "expected_std", "valid_count"),
+    [
+        ([0.5, 0.9, float("nan")], 0.7, np.sqrt(0.08), 2),
+        ([0.5, float("nan")], 0.5, None, 1),
+        ([float("nan")], None, None, 0),
+        ([], None, None, 0),
+    ],
+)
+def test_fold_ap_reports_equal_fold_means_and_unscorable_folds(
+    evaluation, tmp_path, scores, expected_mean, expected_std, valid_count
+):
+    from src.artifacts import write_json
+
+    # Unequal sample counts must not turn the fold mean into a row-weighted
+    # mean. Missing and single-class folds remain visible in the report.
+    folds = [
+        {"outer_fold": index, "average_precision": score, "n": 10 ** (index + 1)}
+        for index, score in enumerate(scores)
+    ]
+    changed = replace(evaluation, fold_metrics={name: folds for name in _model_names(evaluation)})
+    path = write_json(tmp_path / "metrics.json", changed.to_dict())
+    summary = json.loads(path.read_text())["fold_ap_summary"]["stack"]
+    if expected_mean is None:
+        assert summary["mean"] is None
+    else:
+        assert summary["mean"] == pytest.approx(expected_mean)
+    if expected_std is None:
+        assert summary["std"] is None
+    else:
+        assert summary["std"] == pytest.approx(expected_std)
+    assert summary["n_valid_folds"] == valid_count
+    assert summary["n_outer_folds"] == changed.n_outer_folds
+    table = changed.fold_ap_table()
+    assert len(table) == len(_model_names(changed)) * changed.n_outer_folds
+    for _, rows in table.groupby("model"):
+        assert rows.outer_fold.tolist() == list(range(changed.n_outer_folds))
+        assert rows.average_precision.notna().sum() == valid_count
+    assert changed.selection_scores() == evaluation.selection_scores()
+
+
+def test_evaluation_csvs_agree_with_json_and_explicit_run_id_cannot_overwrite(
+    evaluation, tmp_path
+):
+    written = write_evaluation_artifacts(
+        evaluation, tmp_path, seed=42, run_id="20260907T120000Z-12345678"
+    )
+    directory = written[0].parent
+    before = (directory / "metrics.json").read_bytes()
+    payload = json.loads(before)
+    comparison = pd.read_csv(directory / "model_comparison.csv").set_index("model")
+    folds = pd.read_csv(directory / "fold_average_precision.csv")
+    for name in _model_names(evaluation):
+        np.testing.assert_allclose(
+            comparison.loc[name, "mean_fold_average_precision"],
+            payload["fold_ap_summary"][name]["mean"],
+        )
+        for row in folds.loc[folds.model == name].itertuples():
+            original = next(f for f in evaluation.fold_metrics[name]
+                            if f["outer_fold"] == row.outer_fold)
+            assert row.average_precision == pytest.approx(original["average_precision"])
+    with pytest.raises(TransitExoplanetMLError, match="Reports are immutable"):
+        write_evaluation_artifacts(evaluation, tmp_path, seed=42, run_id=directory.name)
+    assert (directory / "metrics.json").read_bytes() == before
+
+
 # ---------------------------------------------------------------------------
 # Training artifacts
 # ---------------------------------------------------------------------------
@@ -141,6 +210,7 @@ def test_artifact_records_full_provenance(trained):
     assert "git" in provenance
     assert provenance["dependencies"]["scikit-learn"]
     assert provenance["dependencies"]["lightgbm"]
+    assert provenance["dependencies"]["catboost"]
 
     stars = json.loads((trained.artifact_dir / "training_stars.json").read_text())
     assert stars["n_stars"] == len(trained.bundle.train_stars)
@@ -148,6 +218,22 @@ def test_artifact_records_full_provenance(trained):
         f"{star}_202601{1 + i % 28:02d}.csv"
         for i, star in enumerate(trained.bundle.train_stars)
     }
+
+
+def test_summary_includes_nested_evaluation_models(trained, evaluation, tmp_path):
+    # ``train_model(run_evaluation=False)`` is used by the shared fixture for
+    # speed. Attach the already-computed evaluation to exercise the artifact
+    # path used by the CLI, where nested evaluation is present.
+    run = copy.copy(trained)
+    run.evaluation = evaluation
+    written = write_training_artifacts(run, tmp_path)
+    summary = json.loads((written.artifact_dir / "summary.json").read_text())
+    assert set(summary["nested_evaluation"]["models"]) == set(_model_names(evaluation))
+    assert "fold_ap_summary" in summary["nested_evaluation"]
+    report_dir = written.artifact_dir / "evaluation"
+    assert (report_dir / "fold_average_precision.csv").is_file()
+    provenance = json.loads((report_dir / "provenance.json").read_text())
+    assert provenance["run_id"] == written.bundle.run_id
 
 
 def test_artifact_schema_and_threshold_are_persisted(trained):
@@ -176,11 +262,11 @@ def test_rerunning_into_a_populated_directory_is_refused(trained, fast_config):
         write_training_artifacts(trained, trained.artifact_dir.parent)
 
 
-def test_training_uses_the_precision_objective(trained):
+def test_training_meets_the_configured_recall_floor(trained):
     report = trained.report
     selected = trained.bundle.selected_model
     choice = report["models"][selected]["threshold_choice"]
-    assert choice["precision"] == pytest.approx(1.0)
+    assert choice["recall"] >= trained.bundle.config["objective"]["min_recall"]
 
 
 def test_training_oof_frame_labels_accepted_rows_only(trained):
