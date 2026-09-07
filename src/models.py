@@ -14,7 +14,7 @@ from sklearn.ensemble import ExtraTreesClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 
-from .config import BASE_LEARNERS, Config
+from .config import Config
 from .errors import ConfigError
 
 # Above this many combinations the full product is sampled rather than enumerated.
@@ -26,6 +26,11 @@ _ESTIMATORS: dict[str, type[BaseEstimator]] = {
     "extra_trees": ExtraTreesClassifier,
     "lightgbm": LGBMClassifier,
 }
+
+
+def known_learners() -> frozenset[str]:
+    """Learner names supported by the estimator registry."""
+    return frozenset(_ESTIMATORS)
 
 
 def build_estimator(learner: str, params: dict[str, Any], config: Config) -> BaseEstimator:
@@ -86,11 +91,65 @@ def candidate_params(learner: str, config: Config) -> list[dict[str, Any]]:
 
 
 def all_candidate_params(config: Config) -> dict[str, list[dict[str, Any]]]:
-    return {name: candidate_params(name, config) for name in BASE_LEARNERS}
+    return {name: candidate_params(name, config) for name in config.base_learners}
 
 
-def build_meta_estimator(config: Config) -> LogisticRegression:
-    """The fixed L2 logistic meta-model; it only ever sees base probabilities."""
-    kwargs = dict(config.meta)
+def build_meta_estimator(
+    config: Config, params: dict[str, Any] | None = None
+) -> LogisticRegression:
+    """Build the logistic meta-model from fixed settings plus tuned parameters."""
+    spec = config.meta
+    # Keep the meta section backward-compatible with the base-learner shape:
+    # scalar settings are fixed, while ``grid`` and ``n_candidates`` describe
+    # the search space and must not be passed to sklearn.
+    kwargs = {
+        key: value
+        for key, value in spec.items()
+        if key not in {"grid", "n_candidates", "fixed"}
+    }
+    kwargs.update(spec.get("fixed") or {})
+    kwargs.update(params or {})
     kwargs.setdefault("random_state", config.seed)
     return LogisticRegression(**kwargs)
+
+
+def meta_candidate_params(config: Config) -> list[dict[str, Any]]:
+    """Deterministically derive the meta-learner parameter candidates."""
+    spec = config.meta
+    grid = spec.get("grid")
+    if not isinstance(grid, dict) or "C" not in grid:
+        # A scalar C remains a valid one-candidate configuration for loading
+        # older configs, while packaged configs use the explicit grid.
+        return [{"C": spec["C"]}]
+    return _candidate_params_from_spec(spec, config.seed, "meta")
+
+
+def _candidate_params_from_spec(
+    spec: dict[str, Any], seed: int, name: str
+) -> list[dict[str, Any]]:
+    """Shared deterministic grid expansion for base and meta learners."""
+    grid: dict[str, list[Any]] = {k: list(v) for k, v in spec["grid"].items()}
+    n_candidates = int(spec.get("n_candidates", prod(len(v) for v in grid.values())))
+    if n_candidates < 1:
+        raise ConfigError(f"{name}.n_candidates must be at least 1.")
+    keys = sorted(grid)
+    values = [grid[k] for k in keys]
+    total = prod(len(v) for v in values)
+    rng = np.random.default_rng(seed)
+
+    if total <= n_candidates:
+        combos = list(itertools.product(*values))
+    elif total <= MAX_ENUMERATED_COMBINATIONS:
+        everything = list(itertools.product(*values))
+        chosen = np.sort(rng.permutation(total)[:n_candidates])
+        combos = [everything[int(i)] for i in chosen]
+    else:
+        seen: set[tuple[Any, ...]] = set()
+        combos = []
+        while len(combos) < n_candidates:
+            combo = tuple(vals[int(rng.integers(len(vals)))] for vals in values)
+            if combo not in seen:
+                seen.add(combo)
+                combos.append(combo)
+
+    return [dict(zip(keys, combo)) for combo in combos]

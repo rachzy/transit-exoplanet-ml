@@ -7,20 +7,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .config import BASE_LEARNERS
 from .data import Dataset, load_dataset
 from .errors import SchemaVersionError
 from .schema import FeatureSchema
 from .stacking import STACK
 from .training import POTENTIAL, UNLIKELY, ModelBundle, load_model
 
-PROBABILITY_COLUMNS = tuple(f"prob_{name}" for name in BASE_LEARNERS)
-
 ADDED_COLUMNS = (
     "source_file",
     "star_id",
     "row_index",
-    *PROBABILITY_COLUMNS,
     "prob_stack",
     "potential_probability",
     "decision_threshold",
@@ -71,7 +67,7 @@ def predict_dataset(
     probabilities = candidates[bundle.selected_model]
 
     frame = dataset.frame.copy()
-    for name in BASE_LEARNERS:
+    for name in bundle.stack.base_learners:
         frame[f"prob_{name}"] = candidates[name]
     frame["prob_stack"] = candidates[STACK]
     frame["potential_probability"] = probabilities

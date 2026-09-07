@@ -15,7 +15,7 @@ from .errors import TransitExoplanetMLError
 from .evaluate import evaluate_dataset
 from .predict import predict_dataset, prediction_counts
 from .schema import load_schema
-from .stacking import reported_models, select_best_model
+from .stacking import reported_models
 from .training import (
     train_model,
     write_evaluation_artifacts,
@@ -154,11 +154,11 @@ def evaluate(
     )
     metric = resolved.selection["metric"]
     scores = result.selection_scores(metric)
-    would_ship = select_best_model(scores, resolved.selection_candidates)
+    would_ship = result.would_ship()
 
     _echo("")
     _echo(f"{'model':22s} {'precision':>10s} {'recall':>8s} {'F2':>8s} {'AP':>8s} {'ROC-AUC':>8s}")
-    for name in reported_models():
+    for name in reported_models(resolved):
         metrics = result.pooled_metrics[name]
         marker = " *" if name == would_ship else "  "
         _echo(

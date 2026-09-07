@@ -122,13 +122,15 @@ frame   = predict_dataset(run.bundle, data_dir="data/processed/test")
 
 ## Modeling
 
-Five candidates are fitted on every run: the LightGBM + ExtraTrees + RBF SVM +
-logistic-regression **stack** with an L2 logistic meta-model, and each of the
-four **base learners** on its own.
+The configured base learners are fitted on every run, together with the L2
+logistic-regression **stack**. Each configured base learner is also evaluated on
+its own.
 
-**The candidate with the highest precision ships.** `train` ranks them,
+**Among candidates meeting the recall floor, the highest-scoring candidate ships.**
+`train` ranks them,
 serves the winner from `predict`, and records the full ranking in
-`selection.json`. All five stay in the bundle, so a run can be re-examined -- or
+`selection.json`. All fitted candidates stay in the bundle, so a run can be
+re-examined -- or
 the selection revisited -- without refitting.
 
 Selection is configurable under `selection` in the config:
@@ -136,16 +138,16 @@ Selection is configurable under `selection` in the config:
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `strategy` | `best` | `best` picks the top scorer; naming a model (e.g. `stack`) pins it |
-| `metric` | `precision` | precision at each model's selected threshold |
+| `metric` | `average_precision` | `average_precision` or `precision`, after applying the recall floor |
 | `score_source` | `nested_evaluation` | pooled held-out scores, falling back to cross-fitted training scores when evaluation is skipped |
-| `candidates` | all five | which models may be chosen; ties fall to the first listed |
+| `candidates` | configured models plus stack | which configured models may be chosen; ties fall to the first listed |
 
-> **Selection caveat.** The winner is chosen on the same held-out score that is
-> then reported for it. Taking the best of six correlated estimates biases that
-> score upward, so treat the shipped model's headline number as optimistic. When
-> the winning margin is small relative to the bootstrap intervals -- which it
-> often is on a few dozen stars -- the ranking is not stable, and both `evaluate`
-> and `train` say so explicitly.
+> **Selection caveat.** The winner is chosen from candidates whose held-out
+> recall meets `objective.min_recall`, using the configured selection metric.
+> The same held-out score is then reported for it, so taking the best of five
+> correlated estimates still biases the headline number upward. When the
+> winning margin is small relative to the bootstrap intervals -- which it often
+> is on a few dozen stars -- the ranking is not stable.
 
 Each base learner gets its own preprocessing, all of it fitted inside the fold
 that uses it and persisted with the bundle:
@@ -165,8 +167,10 @@ weighting is used.
 
 ### Objective
 
-Pick the threshold with the greatest precision on cross-fitted **accepted**
-candidates. Ties resolve towards higher recall.
+Pick the threshold with the greatest precision that reaches `objective.min_recall`
+on cross-fitted **accepted** candidates. Ties resolve towards higher recall.
+Hyperparameters use `objective.metric`; both it and `selection.metric` accept
+`average_precision` or `precision`.
 
 Reported metrics and the tuning score use the same equal-star weights as the
 fits, so a star with many candidates does not dominate the numbers
@@ -188,8 +192,8 @@ solely on held-out stars and aggregated across folds.
 
 Tuning is conservative and seeded (`seed: 42`), scored by accepted-candidate
 average precision: 6 logistic-regression candidates, 24 each for the RBF SVM,
-ExtraTrees (500 trees), and LightGBM. The meta-model is fixed at L2 with
-`C = 0.1` and is never tuned.
+ExtraTrees (500 trees), and LightGBM. The meta-model remains L2, with its `C`
+selected from the configured grid using the same grouped inner CV.
 
 ## Artifacts
 

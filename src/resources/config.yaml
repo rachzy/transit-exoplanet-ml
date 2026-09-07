@@ -2,12 +2,13 @@ config_version: 1
 seed: 42
 
 objective:
-  metric: precision
+  metric: average_precision
+  min_recall: 0.95
   weighted_metrics: true
 
 selection:
   strategy: best
-  metric: precision
+  metric: average_precision
   score_source: nested_evaluation
   candidates:
     - stack
@@ -95,7 +96,10 @@ models:
       reg_lambda: [0.0, 0.1, 1.0]
 
 meta:
+  n_candidates: 6
   C: 0.1
   solver: lbfgs
   max_iter: 5000
   class_weight: null
+  grid:
+    C: [0.001, 0.01, 0.1, 1, 10, 100]

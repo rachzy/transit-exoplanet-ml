@@ -8,14 +8,14 @@
 | **Version**       | 0.1.0 (feature schema version 1)                                                 |
 | **Type**          | Stacked binary classifier                                                        |
 | **Base learners** | LightGBM, ExtraTrees (500 trees), RBF SVM (Platt-scaled), L2 logistic regression |
-| **Meta-learner**  | L2 logistic regression, `C = 0.1`, fixed and never tuned                         |
+| **Meta-learner**  | L2 logistic regression, `C` selected by grouped inner CV                         |
 | **Meta inputs**   | the four base probabilities, and nothing else                                    |
 | **Output**        | `potential_probability` ∈ [0, 1] and a `POTENTIAL` / `UNLIKELY` decision         |
 | **Seed**          | 42                                                                               |
 | **License**       | see `LICENSE`                                                                    |
 
-All six candidates are fitted on every run and **the one with the highest
-average precision ships**. The full ranking, the runner-up, and the winning
+All configured candidates are fitted on every run and **the highest-scoring candidate
+that meets the recall floor ships**. The full ranking, the runner-up, and the winning
 margin are recorded in `selection.json` and printed by the CLI. Every candidate
 stays in the bundle, so the choice can be revisited without refitting; setting
 `selection.strategy` to a model name pins that model instead.
@@ -120,7 +120,7 @@ fold selects its threshold using only its outer-training predictions and then
 applies it to untouched outer-validation stars. Permutation importance is
 computed solely on held-out stars, and the per-fold distributions are aggregated.
 
-Reported for all six candidates -- the stack, every base learner, and the
+Reported for the stack and every configured base learner, plus the
 unweighted probability-average baseline: precision and recall at the chosen threshold,
 average precision, ROC-AUC, F2, confusion matrix, Brier score, log loss, a
 calibration curve, per-star summaries, and star-bootstrap 95 % confidence

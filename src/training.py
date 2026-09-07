@@ -21,7 +21,7 @@ from .artifacts import (
     write_json,
     write_yaml,
 )
-from .config import BASE_LEARNERS, SELECTION_STRATEGY_BEST, Config, load_config
+from .config import SELECTION_STRATEGY_BEST, Config, load_config
 from .data import (
     Dataset,
     composite_strata,
@@ -65,6 +65,8 @@ class SelectionRecord:
     score_source: str
     scores: dict[str, float]
     candidates: tuple[str, ...]
+    recalls: dict[str, float] | None = None
+    min_recall: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -74,13 +76,30 @@ class SelectionRecord:
             "score_source": self.score_source,
             "candidates": list(self.candidates),
             "scores": self.scores,
+            "recalls": getattr(self, "recalls", None),
+            "min_recall": getattr(self, "min_recall", None),
             "runner_up": self.runner_up,
             "margin": self.margin,
         }
 
     @property
     def ranked(self) -> list[tuple[str, float]]:
-        usable = [(n, s) for n, s in self.scores.items() if not np.isnan(s)]
+        recalls = getattr(self, "recalls", None)
+        min_recall = getattr(self, "min_recall", None)
+        usable = [
+            (n, s)
+            for n, s in self.scores.items()
+            if not np.isnan(s)
+            and (
+                min_recall is None
+                or (
+                    recalls is not None
+                    and n in recalls
+                    and not np.isnan(recalls[n])
+                    and recalls[n] >= min_recall - 1e-12
+                )
+            )
+        ]
         return sorted(usable, key=lambda item: -item[1])
 
     @property
@@ -136,7 +155,7 @@ class ModelBundle:
     # -- inference --------------------------------------------------------
     def base_probabilities(self, X: np.ndarray) -> dict[str, np.ndarray]:
         matrix = self.stack.base_matrix(np.asarray(X, dtype=float))
-        return {name: matrix[:, i] for i, name in enumerate(BASE_LEARNERS)}
+        return {name: matrix[:, i] for i, name in enumerate(self.stack.base_learners)}
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         return self.stack.predict_proba(np.asarray(X, dtype=float))
@@ -264,7 +283,7 @@ def _training_oof_frame(fit: StackFitResult, dataset: Dataset) -> pd.DataFrame:
             "y_true": y,
         }
     )
-    for name in BASE_LEARNERS:
+    for name in fit.stack.base_learners:
         frame[f"prob_{name}"] = probabilities[name]
     frame["prob_stack"] = probabilities[STACK]
 
@@ -294,7 +313,7 @@ def _training_report(
     weights = star_balanced_weights(groups[rows]) if config.weighted_metrics else None
 
     per_model: dict[str, Any] = {}
-    for name in reported_models():
+    for name in reported_models(config):
         threshold = fit.thresholds[name].threshold
         per_model[name] = {
             "threshold_choice": fit.thresholds[name].to_dict(),
@@ -333,7 +352,26 @@ def _crossfit_scores(
                 y[rows], probabilities[name][rows], fit.thresholds[name].threshold, weights
             ).get(metric, float("nan"))
         )
-        for name in reported_models()
+        for name in reported_models(config)
+    }
+
+
+def _crossfit_recalls(
+    fit: StackFitResult, dataset: Dataset, config: Config
+) -> dict[str, float]:
+    """Recall of each candidate at its cross-fitted recall-floor threshold."""
+    y, accepted = dataset.require_supervision()
+    groups = dataset.star_id
+    probabilities = fit.training_probabilities()
+    rows = np.flatnonzero(accepted & ~np.isnan(probabilities[STACK]))
+    weights = star_balanced_weights(groups[rows]) if config.weighted_metrics else None
+    return {
+        name: float(
+            compute_metrics(
+                y[rows], probabilities[name][rows], fit.thresholds[name].threshold, weights
+            ).get("recall", float("nan"))
+        )
+        for name in reported_models(config)
     }
 
 
@@ -358,15 +396,22 @@ def choose_model(
 
     if preferred == "nested_evaluation" and evaluation is not None:
         scores = evaluation.selection_scores(metric)
+        recalls = evaluation.selection_recalls()
         source = "nested_evaluation"
     else:
         scores = _crossfit_scores(fit, dataset, config, metric)
+        recalls = _crossfit_recalls(fit, dataset, config)
         source = "crossfit"
 
     selected = (
         strategy
         if strategy != SELECTION_STRATEGY_BEST
-        else select_best_model(scores, candidates)
+        else select_best_model(
+            scores,
+            candidates,
+            recalls=recalls,
+            min_recall=config.min_recall,
+        )
     )
     return SelectionRecord(
         selected_model=selected,
@@ -375,6 +420,8 @@ def choose_model(
         score_source=source,
         scores=scores,
         candidates=candidates,
+        recalls=recalls,
+        min_recall=config.min_recall if strategy == SELECTION_STRATEGY_BEST else None,
     )
 
 
@@ -606,7 +653,7 @@ def _summary(run: TrainingRun) -> dict[str, Any]:
                     "average_precision": pooled[name]["average_precision"],
                     "roc_auc": pooled[name]["roc_auc"],
                 }
-                for name in reported_models()
+                for name in reported_models(config)
             },
             "production_model": selection.selected_model,
         }

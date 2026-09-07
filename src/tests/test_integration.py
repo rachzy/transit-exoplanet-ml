@@ -14,7 +14,6 @@ from src.errors import SchemaVersionError
 from src.evaluate import evaluate_dataset
 from src.predict import ADDED_COLUMNS, predict_dataset
 from src.schema import load_schema
-from src.stacking import reported_models
 from src.training import (
     POTENTIAL,
     UNLIKELY,
@@ -31,6 +30,11 @@ def evaluation(train_dir, schema, fast_config):
     return evaluate_dataset(dataset=dataset, config=fast_config)
 
 
+def _model_names(evaluation):
+    config = evaluation.config if hasattr(evaluation, "config") else evaluation.bundle.config
+    return ("stack", *config["models"])
+
+
 @pytest.fixture(scope="module")
 def trained(train_dir, schema, fast_config, tmp_path_factory):
     dataset = load_dataset(train_dir, mode="train", schema=schema)
@@ -43,7 +47,7 @@ def trained(train_dir, schema, fast_config, tmp_path_factory):
 # Nested evaluation
 # ---------------------------------------------------------------------------
 def test_evaluation_reports_every_model(evaluation):
-    assert set(evaluation.pooled_metrics) == set(reported_models())
+    assert set(evaluation.pooled_metrics) == set(_model_names(evaluation))
     assert evaluation.n_outer_folds >= 3
     assert len(evaluation.inner_folds_per_outer) == evaluation.n_outer_folds
     assert all(n >= 2 for n in evaluation.inner_folds_per_outer)
@@ -64,7 +68,7 @@ def test_every_accepted_row_is_predicted_exactly_once(evaluation, train_dir, sch
 
 
 def test_evaluation_includes_bootstrap_calibration_and_importance(evaluation):
-    for name in reported_models():
+    for name in _model_names(evaluation):
         intervals = evaluation.bootstrap[name].intervals
         assert intervals["recall"]["lower"] <= intervals["recall"]["upper"]
         assert evaluation.calibration[name]
@@ -84,12 +88,17 @@ def test_comparison_table_marks_the_model_that_would_ship(evaluation):
     table = evaluation.comparison_table()
     shipped = table.loc[table["is_production"], "model"].tolist()
     assert shipped == [evaluation.would_ship()]
-    assert len(table) == len(reported_models())
+    assert len(table) == len(_model_names(evaluation))
 
 
 def test_would_ship_is_the_highest_average_precision(evaluation):
     scores = evaluation.selection_scores("average_precision")
-    best = max(scores.values())
+    recalls = evaluation.selection_recalls()
+    feasible = [
+        score for name, score in scores.items()
+        if recalls[name] >= evaluation.config["objective"]["min_recall"] - 1e-12
+    ]
+    best = max(feasible)
     assert scores[evaluation.would_ship()] == pytest.approx(best)
 
 
@@ -148,7 +157,7 @@ def test_artifact_schema_and_threshold_are_persisted(trained):
 
     threshold = json.loads((trained.artifact_dir / "threshold.json").read_text())
     assert threshold["threshold"] == pytest.approx(trained.bundle.threshold)
-    assert set(threshold["comparator_thresholds"]) == set(reported_models())
+    assert set(threshold["comparator_thresholds"]) == set(_model_names(trained))
 
 
 def test_manifest_covers_every_written_file(trained):
@@ -305,14 +314,14 @@ def test_prediction_rejects_a_feature_set_mismatch(trained, predict_dir, tmp_pat
 def test_per_star_summary_covers_every_reported_model(evaluation, train_dir, schema):
     dataset = load_dataset(train_dir, mode="train", schema=schema)
     frame = pd.DataFrame(evaluation.per_star)
-    assert set(frame["model"]) == set(reported_models())
+    assert set(frame["model"]) == set(_model_names(evaluation))
 
     stars_with_accepted = {
         star
         for star in dataset.stars
         if dataset.accepted[dataset.star_id == star].any()
     }
-    for name in reported_models():
+    for name in _model_names(evaluation):
         rows = frame[frame["model"] == name]
         assert set(rows["star_id"]) == stars_with_accepted
         assert (rows["n_flagged"] <= rows["n_accepted"]).all()

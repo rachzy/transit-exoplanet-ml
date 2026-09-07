@@ -131,7 +131,10 @@ def fast_config() -> Config:
         data["models"][name]["n_candidates"] = 2
     data["models"]["extra_trees"]["fixed"]["n_estimators"] = 25
     data["models"]["lightgbm"]["grid"]["n_estimators"] = [25]
-    data["models"]["svm_rbf"]["calibration"]["cv"] = 3
+    if "svm_rbf" in data["models"]:
+        data["models"]["svm_rbf"]["calibration"]["cv"] = 3
+    data["meta"]["n_candidates"] = 2
+    data["meta"]["grid"]["C"] = [0.01, 1.0]
     data["cv"]["outer_folds"] = 3
     data["cv"]["inner_folds"] = 2
     data["cv"]["final_oof_folds"] = 2

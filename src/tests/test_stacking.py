@@ -6,10 +6,9 @@ import numpy as np
 import pytest
 
 from src import stacking
-from src.config import BASE_LEARNERS
 from src.data import load_dataset
 from src.errors import DataDiversityError
-from src.models import candidate_params
+from src.models import meta_candidate_params
 from src.stacking import (
     STACK,
     composite_strata,
@@ -114,21 +113,11 @@ def test_insufficient_diversity_raises_a_diagnostic():
 # ---------------------------------------------------------------------------
 # Candidate grids
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("learner", BASE_LEARNERS)
-def test_candidate_grids_are_deterministic_and_sized(learner, fast_config):
-    first = candidate_params(learner, fast_config)
-    second = candidate_params(learner, fast_config)
+def test_meta_candidate_grid_is_deterministic_and_sized(fast_config):
+    first = meta_candidate_params(fast_config)
+    second = meta_candidate_params(fast_config)
     assert first == second
-    assert len(first) == fast_config.model_spec(learner)["n_candidates"]
-
-
-def test_large_grids_are_sampled_without_duplicates():
-    from src.config import load_config
-
-    config = load_config()
-    combos = candidate_params("lightgbm", config)
-    assert len(combos) == 24
-    assert len({tuple(sorted(c.items())) for c in combos}) == 24
+    assert len(first) == fast_config.meta["n_candidates"]
 
 
 # ---------------------------------------------------------------------------
@@ -151,13 +140,13 @@ def test_rejected_rows_train_bases_but_never_the_meta_model(
         base_fit_sizes.append(len(y_))
         return real_fit_base(learner, params, X, y_, accepted_, groups, config)
 
-    def spy_fit_meta(P, y_, groups, config):
+    def spy_fit_meta(P, y_, groups, config, params=None):
         meta_fit_labels.append(np.asarray(y_).copy())
-        return real_fit_meta(P, y_, groups, config)
+        return real_fit_meta(P, y_, groups, config, params)
 
-    def spy_select(y_, prob, sample_weight=None):
+    def spy_select(y_, prob, min_recall, sample_weight=None):
         threshold_labels.append(np.asarray(y_).copy())
-        return real_select(y_, prob, sample_weight=sample_weight)
+        return real_select(y_, prob, min_recall, sample_weight=sample_weight)
 
     monkeypatch.setattr(stacking, "fit_base", spy_fit_base)
     monkeypatch.setattr(stacking, "fit_meta", spy_fit_meta)
@@ -198,7 +187,8 @@ def test_threshold_is_derived_from_cross_fitted_accepted_rows(dataset, fast_conf
     assert not np.isnan(crossfit[accepted]).all()
 
     choice = result.thresholds[STACK]
-    assert choice.precision == pytest.approx(1.0)
+    assert choice.min_recall == pytest.approx(fast_config.min_recall)
+    assert choice.recall >= fast_config.min_recall - 1e-12
     assert result.stack.threshold == pytest.approx(choice.threshold)
 
 
@@ -207,8 +197,9 @@ def test_every_reported_model_gets_its_own_threshold(dataset, fast_config):
     result = fit_stack(
         dataset.X, y, accepted, dataset.star_id, fast_config, dataset.feature_names
     )
-    assert set(result.thresholds) == set(stacking.reported_models())
-    assert all(choice.precision > 0 for choice in result.thresholds.values())
+    assert set(result.thresholds) == {"stack", *fast_config.base_learners}
+    for name, choice in result.thresholds.items():
+        assert choice.recall >= fast_config.min_recall - 1e-12, name
 
 
 def test_base_out_of_fold_matrix_is_complete_and_probabilistic(dataset, fast_config):
@@ -216,7 +207,7 @@ def test_base_out_of_fold_matrix_is_complete_and_probabilistic(dataset, fast_con
     result = fit_stack(
         dataset.X, y, accepted, dataset.star_id, fast_config, dataset.feature_names
     )
-    assert result.base_oof.shape == (len(dataset), len(BASE_LEARNERS))
+    assert result.base_oof.shape == (len(dataset), len(fast_config.base_learners))
     assert not np.isnan(result.base_oof).any()
     assert ((result.base_oof >= 0) & (result.base_oof <= 1)).all()
 
@@ -226,5 +217,6 @@ def test_meta_model_sees_only_the_four_base_probabilities(dataset, fast_config):
     result = fit_stack(
         dataset.X, y, accepted, dataset.star_id, fast_config, dataset.feature_names
     )
-    assert result.stack.meta.n_features_in_ == len(BASE_LEARNERS)
-    assert pytest.approx(fast_config.meta["C"]) == result.stack.meta.C
+    assert result.stack.meta.n_features_in_ == len(fast_config.base_learners)
+    assert result.stack.meta.C == pytest.approx(result.best_params["meta"]["C"])
+    assert "meta" in result.tuning

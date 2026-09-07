@@ -14,10 +14,18 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import precision_recall_curve, roc_curve
 
-from .stacking import reported_models
-
 FIGSIZE = (7.5, 5.0)
 DPI = 140
+
+
+def _reported_from_frame(frame: pd.DataFrame) -> tuple[str, ...]:
+    """Return model names represented by probability columns in a report."""
+    names = [
+        column.removeprefix("prob_")
+        for column in frame.columns
+        if column.startswith("prob_")
+    ]
+    return tuple(names)
 
 
 def _label(name: str, selected: str) -> str:
@@ -55,7 +63,7 @@ def calibration_plot(
 def pr_curve_plot(oof: pd.DataFrame, path: Path, selected: str) -> Path:
     y = oof["y_true"].to_numpy(dtype=int)
     fig, ax = plt.subplots(figsize=FIGSIZE)
-    for name in reported_models():
+    for name in _reported_from_frame(oof):
         column = f"prob_{name}"
         if column not in oof:
             continue
@@ -74,7 +82,7 @@ def pr_curve_plot(oof: pd.DataFrame, path: Path, selected: str) -> Path:
 def roc_curve_plot(oof: pd.DataFrame, path: Path, selected: str) -> Path:
     y = oof["y_true"].to_numpy(dtype=int)
     fig, ax = plt.subplots(figsize=FIGSIZE)
-    for name in reported_models():
+    for name in _reported_from_frame(oof):
         column = f"prob_{name}"
         if column not in oof:
             continue

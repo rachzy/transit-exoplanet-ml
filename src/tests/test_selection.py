@@ -8,7 +8,7 @@ import pytest
 from src.config import load_config
 from src.data import load_dataset
 from src.errors import ConfigError, DataDiversityError
-from src.stacking import STACK, fit_stack, reported_models, select_best_model
+from src.stacking import STACK, fit_stack, select_best_model
 from src.training import train_model
 
 
@@ -27,11 +27,10 @@ def test_picks_the_highest_scorer():
 
 
 def test_ties_fall_to_the_earlier_candidate():
-    """The stack leads reported_models(), so it keeps a tie."""
-    scores = dict.fromkeys(reported_models(), 0.9)
+    scores = {STACK: 0.9, "lightgbm": 0.9, "extra_trees": 0.9}
     assert select_best_model(scores) == STACK
 
-    without_stack = [m for m in reported_models() if m != STACK]
+    without_stack = ["lightgbm", "extra_trees"]
     assert select_best_model(scores, without_stack) == without_stack[0]
 
 
@@ -45,6 +44,12 @@ def test_unscorable_candidates_are_skipped():
     assert select_best_model(scores) == "lightgbm"
 
 
+def test_selection_enforces_the_recall_floor():
+    scores = {STACK: 0.99, "lightgbm": 0.90, "extra_trees": 0.80}
+    recalls = {STACK: 0.94, "lightgbm": 0.95, "extra_trees": 0.99}
+    assert select_best_model(scores, recalls=recalls, min_recall=0.95) == "lightgbm"
+
+
 def test_no_scorable_candidate_is_an_error():
     with pytest.raises(DataDiversityError, match="No candidate model could be scored"):
         select_best_model({STACK: float("nan")})
@@ -56,8 +61,8 @@ def test_no_scorable_candidate_is_an_error():
 def test_default_strategy_is_best():
     config = load_config()
     assert config.selection["strategy"] == "best"
-    assert config.selection["metric"] == "precision"
-    assert set(config.selection_candidates) == set(reported_models())
+    assert config.selection["metric"] == "average_precision"
+    assert set(config.selection_candidates) == {"stack", *config.base_learners}
 
 
 @pytest.mark.parametrize(
@@ -94,14 +99,14 @@ def test_training_ships_the_highest_scoring_model(dataset, fast_config):
 
 
 def test_pinning_a_model_overrides_the_ranking(dataset, fast_config):
-    pinned = fast_config.with_overrides({"selection": {"strategy": "logistic_regression"}})
+    pinned = fast_config.with_overrides({"selection": {"strategy": "lightgbm"}})
     run = train_model(dataset=dataset, config=pinned, run_evaluation=False)
 
-    assert run.bundle.selected_model == "logistic_regression"
-    assert run.bundle.selection.strategy == "logistic_regression"
+    assert run.bundle.selected_model == "lightgbm"
+    assert run.bundle.selection.strategy == "lightgbm"
     # The threshold travels with the pinned model, not with the stack.
     assert run.bundle.threshold == pytest.approx(
-        run.fit.thresholds["logistic_regression"].threshold
+        run.fit.thresholds["lightgbm"].threshold
     )
 
 
@@ -111,7 +116,7 @@ def test_selection_changes_what_predict_proba_serves(dataset, fast_config):
     X = dataset.X
     candidates = run.bundle.stack.all_probabilities(X)
 
-    for name in reported_models():
+    for name in ("stack", *fast_config.base_learners):
         switched = run.bundle.stack.with_selection(name)
         assert np.array_equal(switched.predict_proba(X), candidates[name])
         assert switched.threshold == pytest.approx(run.fit.thresholds[name].threshold)
@@ -122,7 +127,7 @@ def test_every_candidate_keeps_a_threshold(dataset, fast_config):
     fit = fit_stack(
         dataset.X, y, accepted, dataset.star_id, fast_config, dataset.feature_names
     )
-    assert set(fit.stack.thresholds) == set(reported_models())
+    assert set(fit.stack.thresholds) == {"stack", *fast_config.base_learners}
 
 
 def test_selecting_an_unfitted_model_is_rejected(dataset, fast_config):

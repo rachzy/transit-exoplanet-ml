@@ -56,10 +56,17 @@ class EvaluationResult:
     dataset_summary: dict[str, Any] = field(default_factory=dict)
     config: dict[str, Any] = field(default_factory=dict)
 
-    def selection_scores(self, metric: str = "precision") -> dict[str, float]:
+    def selection_scores(self, metric: str = "average_precision") -> dict[str, float]:
         """Pooled held-out score per model, the basis for choosing what ships."""
         return {
             name: float(pooled.get(metric, float("nan")))
+            for name, pooled in self.pooled_metrics.items()
+        }
+
+    def selection_recalls(self) -> dict[str, float]:
+        """Pooled held-out recall per model for recall-constrained selection."""
+        return {
+            name: float(pooled.get("recall", float("nan")))
             for name, pooled in self.pooled_metrics.items()
         }
 
@@ -67,18 +74,26 @@ class EvaluationResult:
         """The model `train` would select from these results."""
         selection = self.config.get("selection", {})
         strategy = selection.get("strategy", "best")
-        candidates = tuple(selection.get("candidates", reported_models()))
+        candidates = tuple(
+            selection.get("candidates", ("stack", *self.config["models"]))
+        )
+        candidates = tuple(
+            name for name in candidates if name == STACK or name in self.config["models"]
+        )
         if strategy != "best":
             return strategy
         return select_best_model(
-            self.selection_scores(selection.get("metric", "precision")), candidates
+            self.selection_scores(selection.get("metric", "average_precision")),
+            candidates,
+            recalls=self.selection_recalls(),
+            min_recall=float(self.config.get("objective", {}).get("min_recall", 0.95)),
         )
 
     def comparison_table(self) -> pd.DataFrame:
         """One row per reported model, ordered with the stack first."""
         selected = self.would_ship()
         rows = []
-        for name in reported_models():
+        for name in (STACK, *self.config["models"]):
             pooled = self.pooled_metrics[name]
             ci = self.bootstrap[name].intervals
             rows.append(
@@ -243,7 +258,7 @@ def evaluate_dataset(
         f"nested evaluation: {n_outer} outer folds over {len(dataset.stars)} stars",
     )
 
-    models = reported_models()
+    models = reported_models(config)
     fold_metrics: dict[str, list[dict[str, Any]]] = {name: [] for name in models}
     fold_thresholds: dict[str, list[float]] = {name: [] for name in models}
     inner_folds_per_outer: list[int] = []

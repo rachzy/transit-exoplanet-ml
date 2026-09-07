@@ -15,11 +15,7 @@ from .errors import ConfigError
 
 DEFAULT_CONFIG_RESOURCE = "config.yaml"
 
-BASE_LEARNERS: tuple[str, ...] = ("lightgbm", "extra_trees", "svm_rbf", "logistic_regression")
-
-# Every model that can be reported and shipped. Defined here (rather than in
-# `stacking`) so config validation does not import the modelling stack.
-ALL_MODELS: tuple[str, ...] = ("stack", *BASE_LEARNERS)
+SUPPORTED_METRICS: tuple[str, ...] = ("precision", "average_precision")
 
 
 @dataclass(frozen=True)
@@ -37,6 +33,14 @@ class Config:
     @property
     def seed(self) -> int:
         return int(self.data["seed"])
+
+    @property
+    def objective_metric(self) -> str:
+        return str(self.data["objective"]["metric"])
+
+    @property
+    def min_recall(self) -> float:
+        return float(self.data["objective"]["min_recall"])
 
     @property
     def weighted_metrics(self) -> bool:
@@ -59,7 +63,22 @@ class Config:
 
     @property
     def selection_candidates(self) -> tuple[str, ...]:
-        return tuple(self.selection["candidates"])
+        configured = set(self.base_learners)
+        return tuple(
+            name
+            for name in self.selection.get("candidates", ("stack", *self.base_learners))
+            if name == "stack" or name in configured
+        )
+
+    @property
+    def base_learners(self) -> tuple[str, ...]:
+        """Base learners enabled by the configured ``models`` mapping."""
+        return tuple(self.data["models"])
+
+    @property
+    def all_models(self) -> tuple[str, ...]:
+        """Stack plus the configured base learners."""
+        return ("stack", *self.base_learners)
 
     @property
     def meta(self) -> dict[str, Any]:
@@ -145,27 +164,46 @@ def _validate(config: Config) -> None:
             f"number; got {multiplier}."
         )
 
-    objective_metric = config.data["objective"].get("metric")
-    if objective_metric != "precision":
+    if config.objective_metric not in SUPPORTED_METRICS:
         raise ConfigError(
-            "objective.metric must be 'precision'; "
-            f"got {objective_metric!r}."
+            f"objective.metric must be one of {list(SUPPORTED_METRICS)}; "
+            f"got {config.objective_metric!r}."
         )
+    if not 0.0 < config.min_recall <= 1.0:
+        raise ConfigError(f"objective.min_recall must be in (0, 1]; got {config.min_recall}.")
 
     selection = config.selection
-    candidates = selection.get("candidates") or []
+    selection_metric = selection.get("metric")
+    if selection_metric not in SUPPORTED_METRICS:
+        raise ConfigError(
+            f"selection.metric must be one of {list(SUPPORTED_METRICS)}; "
+            f"got {selection_metric!r}."
+        )
+    configured_candidates = selection.get("candidates")
+    if configured_candidates is None:
+        candidates = ["stack", *config.base_learners]
+    else:
+        candidates = configured_candidates
     if not candidates:
         raise ConfigError("selection.candidates must list at least one model.")
-    unknown = [c for c in candidates if c not in ALL_MODELS]
+    from .models import known_learners
+
+    unknown = [name for name in candidates if name != "stack" and name not in known_learners()]
     if unknown:
         raise ConfigError(
-            f"selection.candidates names unknown models {unknown}; known: {list(ALL_MODELS)}."
+            f"selection.candidates names unknown models {unknown}; known learners are "
+            f"{sorted(known_learners())}."
         )
+    active_candidates = [
+        name for name in candidates if name == "stack" or name in config.base_learners
+    ]
+    if not active_candidates:
+        raise ConfigError("selection.candidates must list at least one model.")
     strategy = selection.get("strategy")
-    if strategy != SELECTION_STRATEGY_BEST and strategy not in candidates:
+    if strategy != SELECTION_STRATEGY_BEST and strategy not in active_candidates:
         raise ConfigError(
             f"selection.strategy must be {SELECTION_STRATEGY_BEST!r} or one of the "
-            f"configured candidates {list(candidates)}; got {strategy!r}."
+            f"configured candidates {active_candidates}; got {strategy!r}."
         )
     source = selection.get("score_source")
     if source not in SELECTION_SOURCES:
@@ -186,13 +224,37 @@ def _validate(config: Config) -> None:
     if int(cv["inner_folds"]) < int(cv["min_inner_folds"]):
         raise ConfigError("cv.inner_folds must not be below cv.min_inner_folds.")
 
-    missing = [name for name in BASE_LEARNERS if name not in data["models"]]
-    if missing:
-        raise ConfigError(f"Config is missing base learners: {missing}.")
+    if not isinstance(data["models"], dict) or not data["models"]:
+        raise ConfigError("Config section models must contain at least one learner.")
 
-    for name in BASE_LEARNERS:
-        spec = data["models"][name]
+    from .models import known_learners
+
+    unknown_learners = [name for name in data["models"] if name not in known_learners()]
+    if unknown_learners:
+        raise ConfigError(
+            f"models names unknown learners {unknown_learners}; known learners are "
+            f"{sorted(known_learners())}."
+        )
+    for name, spec in data["models"].items():
         if "grid" not in spec or not isinstance(spec["grid"], dict):
             raise ConfigError(f"models.{name}.grid must be a mapping of parameter -> values.")
         if int(spec.get("n_candidates", 0)) < 1:
             raise ConfigError(f"models.{name}.n_candidates must be at least 1.")
+
+    meta = data["meta"]
+    meta_grid = meta.get("grid")
+    if meta_grid is None and "C" in meta:
+        # Accept pre-grid configs as a one-candidate search for compatibility.
+        meta_grid = {"C": [meta["C"]]}
+    if not isinstance(meta_grid, dict) or "C" not in meta_grid:
+        raise ConfigError("meta.grid.C must be a non-empty tuning grid.")
+    if not meta_grid["C"]:
+        raise ConfigError("meta.grid.C must be a non-empty tuning grid.")
+    if int(meta.get("n_candidates", 1)) < 1:
+        raise ConfigError("meta.n_candidates must be at least 1.")
+    for value in meta_grid["C"]:
+        if not math.isfinite(float(value)) or float(value) <= 0.0:
+            raise ConfigError(
+                "meta.grid.C values must be positive and finite; "
+                f"got {value!r}."
+            )

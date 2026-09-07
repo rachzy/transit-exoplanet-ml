@@ -17,23 +17,33 @@ from src.metrics import (
 # ---------------------------------------------------------------------------
 # Threshold selection
 # ---------------------------------------------------------------------------
-def test_picks_the_highest_precision_threshold():
+def test_picks_the_most_precise_threshold_meeting_the_recall_floor():
     y = np.array([1, 1, 1, 1, 0, 0, 0, 0])
     p = np.array([0.95, 0.90, 0.80, 0.60, 0.70, 0.40, 0.30, 0.10])
 
-    choice = select_threshold(y, p)
+    choice = select_threshold(y, p, min_recall=0.95)
+    assert choice.threshold == pytest.approx(0.60)
+    assert choice.recall == pytest.approx(1.0)
+    assert choice.precision == pytest.approx(4 / 5)
+    assert choice.achieved
+
+
+def test_a_lower_recall_floor_permits_a_more_precise_threshold():
+    y = np.array([1, 1, 1, 1, 0, 0, 0, 0])
+    p = np.array([0.95, 0.90, 0.80, 0.60, 0.70, 0.40, 0.30, 0.10])
+
+    choice = select_threshold(y, p, min_recall=0.70)
     assert choice.threshold == pytest.approx(0.80)
-    assert choice.recall == pytest.approx(0.75)
     assert choice.precision == pytest.approx(1.0)
+    assert choice.recall == pytest.approx(0.75)
 
 
-def test_precision_can_take_priority_over_recall():
+def test_recall_floor_is_not_traded_away_for_precision():
     y = np.array([1] * 10 + [0] * 10)
     p = np.concatenate([np.linspace(0.30, 0.99, 10), np.linspace(0.01, 0.35, 10)])
 
-    choice = select_threshold(y, p)
-    assert choice.precision == pytest.approx(1.0)
-    assert choice.recall < 0.95
+    choice = select_threshold(y, p, min_recall=0.95)
+    assert choice.recall >= 0.95
 
 
 def test_ties_resolve_to_the_more_inclusive_threshold():
@@ -41,7 +51,7 @@ def test_ties_resolve_to_the_more_inclusive_threshold():
     p = np.array([0.9, 0.8, 0.2, 0.1])
     # 0.8 and 0.3..0.8 all give perfect precision and recall; the lowest of the
     # tied candidates is kept because it generalises more safely.
-    choice = select_threshold(y, p)
+    choice = select_threshold(y, p, min_recall=0.95)
     assert choice.threshold == pytest.approx(0.8)
     assert choice.precision == pytest.approx(1.0)
 
@@ -49,23 +59,25 @@ def test_ties_resolve_to_the_more_inclusive_threshold():
 def test_threshold_honours_sample_weights():
     y = np.array([0, 1, 0, 1])
     p = np.array([0.9, 0.8, 0.7, 0.6])
-    unweighted = select_threshold(y, p)
-    heavy = select_threshold(y, p, sample_weight=np.array([1.0, 1.0, 100.0, 1.0]))
+    unweighted = select_threshold(y, p, min_recall=1.0)
+    heavy = select_threshold(
+        y, p, min_recall=0.5, sample_weight=np.array([1.0, 1.0, 100.0, 1.0])
+    )
     assert unweighted.threshold == pytest.approx(0.6)
     assert heavy.threshold == pytest.approx(0.8)
 
 
 def test_empty_or_all_negative_input_is_rejected():
     with pytest.raises(ValueError, match="empty"):
-        select_threshold(np.array([]), np.array([]))
+        select_threshold(np.array([]), np.array([]), 0.95)
     with pytest.raises(ValueError, match="no positive"):
-        select_threshold(np.array([0, 0]), np.array([0.2, 0.8]))
+        select_threshold(np.array([0, 0]), np.array([0.2, 0.8]), 0.95)
 
 
 def test_flagging_uses_greater_or_equal():
     y = np.array([1, 0])
     p = np.array([0.5, 0.1])
-    choice = select_threshold(y, p)
+    choice = select_threshold(y, p, 1.0)
     assert (p >= choice.threshold).sum() == 1
 
 
