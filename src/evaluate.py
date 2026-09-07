@@ -56,6 +56,44 @@ class EvaluationResult:
     dataset_summary: dict[str, Any] = field(default_factory=dict)
     config: dict[str, Any] = field(default_factory=dict)
 
+    def fold_ap_summary(self) -> dict[str, dict[str, Any]]:
+        """Arithmetic mean and sample SD of the scorable outer-fold APs.
+
+        Each fold's AP retains the configured candidate weights. Folds receive
+        equal weight in the mean; unscorable folds are counted but excluded.
+        """
+        summary = {}
+        for name in (STACK, *self.config["models"]):
+            values = np.asarray(
+                [fold["average_precision"] for fold in self.fold_metrics[name]], dtype=float
+            )
+            valid = values[np.isfinite(values)]
+            summary[name] = {
+                "mean": float(valid.mean()) if valid.size else float("nan"),
+                "std": float(valid.std(ddof=1)) if valid.size > 1 else float("nan"),
+                "n_valid_folds": int(valid.size),
+                "n_outer_folds": self.n_outer_folds,
+            }
+        return summary
+
+    def fold_ap_table(self) -> pd.DataFrame:
+        """One row per model and outer fold, including unscorable folds."""
+        rows = []
+        for name in (STACK, *self.config["models"]):
+            by_fold = {fold["outer_fold"]: fold for fold in self.fold_metrics[name]}
+            for index in range(self.n_outer_folds):
+                fold = by_fold.get(index, {})
+                rows.append({
+                    "model": name,
+                    "outer_fold": index,
+                    "n_held_out_stars": fold.get("n_held_out_stars", 0),
+                    "n": fold.get("n", 0),
+                    "n_positive": fold.get("n_positive", 0),
+                    "n_negative": fold.get("n_negative", 0),
+                    "average_precision": fold.get("average_precision", float("nan")),
+                })
+        return pd.DataFrame(rows)
+
     def selection_scores(self, metric: str = "average_precision") -> dict[str, float]:
         """Pooled held-out score per model, the basis for choosing what ships."""
         return {
@@ -92,6 +130,7 @@ class EvaluationResult:
     def comparison_table(self) -> pd.DataFrame:
         """One row per reported model, ordered with the stack first."""
         selected = self.would_ship()
+        fold_ap = self.fold_ap_summary()
         rows = []
         for name in (STACK, *self.config["models"]):
             pooled = self.pooled_metrics[name]
@@ -108,6 +147,9 @@ class EvaluationResult:
                     "recall_hi": ci.get("recall", {}).get("upper", float("nan")),
                     "f2": pooled["f2"],
                     "average_precision": pooled["average_precision"],
+                    "mean_fold_average_precision": fold_ap[name]["mean"],
+                    "std_fold_average_precision": fold_ap[name]["std"],
+                    "n_valid_ap_folds": fold_ap[name]["n_valid_folds"],
                     "ap_lo": ci.get("average_precision", {}).get("lower", float("nan")),
                     "ap_hi": ci.get("average_precision", {}).get("upper", float("nan")),
                     "roc_auc": pooled["roc_auc"],
@@ -159,6 +201,7 @@ class EvaluationResult:
             "would_ship": self.would_ship(),
             "pooled_metrics": self.pooled_metrics,
             "fold_metrics": self.fold_metrics,
+            "fold_ap_summary": self.fold_ap_summary(),
             "fold_thresholds": self.fold_thresholds,
             "bootstrap": {name: result.to_dict() for name, result in self.bootstrap.items()},
             "calibration": self.calibration,

@@ -28,7 +28,7 @@ from .data import (
     load_dataset,
     star_balanced_weights,
 )
-from .errors import SchemaVersionError
+from .errors import SchemaVersionError, TransitExoplanetMLError
 from .evaluate import EvaluationResult, evaluate_dataset
 from .metrics import (
     ThresholdChoice,
@@ -524,11 +524,35 @@ def write_evaluation_artifacts(
     seed: int,
     run_id: str | None = None,
 ) -> list[Path]:
+    """Write a standalone evaluation under ``directory/<UTC timestamp>-<id>``.
+
+    Reserve a new directory atomically; even an explicit run ID cannot replace
+    an existing report. Training uses its own already-reserved run directory.
+    """
+    run_id = run_id or new_run_id()
+    destination = Path(directory) / run_id
+    try:
+        destination.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as exc:
+        raise TransitExoplanetMLError(
+            f"Evaluation directory {destination} already exists. "
+            "Reports are immutable: choose a different run ID or output directory."
+        ) from exc
+    return _write_evaluation_report(result, destination, seed, run_id)
+
+
+def _write_evaluation_report(
+    result: EvaluationResult,
+    directory: Path,
+    seed: int,
+    run_id: str,
+) -> list[Path]:
     """Write metrics, per-fold detail, OOF predictions, importance, and plots."""
     directory.mkdir(parents=True, exist_ok=True)
     written = [
         write_json(directory / "metrics.json", result.to_dict()),
         write_csv(directory / "model_comparison.csv", result.comparison_table()),
+        write_csv(directory / "fold_average_precision.csv", result.fold_ap_table()),
         write_csv(directory / "oof_predictions.csv", result.oof_predictions),
         write_csv(directory / "per_star.csv", pd.DataFrame(result.per_star)),
         write_csv(directory / "permutation_importance.csv", result.permutation_importance),
@@ -596,7 +620,7 @@ def write_training_artifacts(
 
     if run.evaluation is not None:
         written.extend(
-            write_evaluation_artifacts(
+            _write_evaluation_report(
                 run.evaluation,
                 directory / "evaluation",
                 seed=int(bundle.config["seed"]),
@@ -643,8 +667,14 @@ def _summary(run: TrainingRun) -> dict[str, Any]:
     }
     if run.evaluation is not None:
         pooled = run.evaluation.pooled_metrics
+        # Use the learners that were actually fitted into this bundle.  The
+        # serialized config is a plain mapping, and rebuilding a ``Config``
+        # here would be unnecessary; more importantly, the previous code
+        # referenced a local ``config`` that does not exist in this function.
+        models = (STACK, *run.bundle.stack.base_learners)
         payload["nested_evaluation"] = {
             "n_outer_folds": run.evaluation.n_outer_folds,
+            "fold_ap_summary": run.evaluation.fold_ap_summary(),
             "models": {
                 name: {
                     "precision": pooled[name]["precision"],
@@ -653,7 +683,7 @@ def _summary(run: TrainingRun) -> dict[str, Any]:
                     "average_precision": pooled[name]["average_precision"],
                     "roc_auc": pooled[name]["roc_auc"],
                 }
-                for name in reported_models(config)
+                for name in models
             },
             "production_model": selection.selected_model,
         }

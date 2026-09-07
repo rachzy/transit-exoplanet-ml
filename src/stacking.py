@@ -326,23 +326,39 @@ def tune_base_learner(
     )
 
 
+@dataclass
+class MetaFold:
+    """Base probabilities constructed without the meta-validation stars.
+
+    Row indices refer to the enclosing training dataset; probability matrices
+    are local to their respective rows. Training probabilities are OOF within
+    ``train_rows``. Validation probabilities come from bases refitted on those
+    training rows, with hyperparameters selected there as well.
+    """
+
+    train_rows: np.ndarray
+    val_rows: np.ndarray
+    train_probabilities: np.ndarray
+    val_probabilities: np.ndarray
+
+
 def tune_meta_learner(
-    P: np.ndarray,
+    folds: Sequence[MetaFold],
     y: np.ndarray,
     accepted: np.ndarray,
     groups: np.ndarray,
-    splits: Sequence[Split],
     config: Config,
     progress: Progress = None,
 ) -> TuningResult:
-    """Tune the meta-model's C using grouped cross-fitted base probabilities."""
+    """Tune C using independently constructed inputs for each meta fold."""
     grid = meta_candidate_params(config)
     weighted = config.weighted_metrics
     records: list[dict[str, Any]] = []
 
     for position, params in enumerate(grid):
         scores: list[float] = []
-        for tr, va in splits:
+        for fold in folds:
+            tr, va = fold.train_rows, fold.val_rows
             train_rows = tr[accepted[tr]]
             val_rows = va[accepted[va]]
             if train_rows.size == 0 or val_rows.size == 0:
@@ -352,9 +368,12 @@ def tune_meta_learner(
                 scores.append(float("nan"))
                 continue
             meta = fit_meta(
-                P[train_rows], y[train_rows], groups[train_rows], config, params
+                fold.train_probabilities[accepted[tr]],
+                y[train_rows], groups[train_rows], config, params
             )
-            probability = np.asarray(meta.predict_proba(P[val_rows]))[:, 1]
+            probability = np.asarray(
+                meta.predict_proba(fold.val_probabilities[accepted[va]])
+            )[:, 1]
             scores.append(
                 _score_fold(
                     y[val_rows],
@@ -434,30 +453,85 @@ def base_oof_matrix(
     return P
 
 
-def crossfit_meta_predictions(
-    P: np.ndarray,
+def prepare_meta_folds(
+    X: np.ndarray,
     y: np.ndarray,
     accepted: np.ndarray,
     groups: np.ndarray,
     splits: Sequence[Split],
     config: Config,
+    progress: Progress = None,
+) -> list[MetaFold]:
+    """Rebuild the upstream pipeline within each meta-training partition.
+
+    A single shared OOF matrix cannot isolate meta-validation: the base models
+    behind its meta-training rows may have seen the meta-validation labels.
+    Both base tuning and the OOF training matrix must instead be constructed
+    using only this meta fold's training stars. Cache these inputs across C
+    candidates and threshold cross-fitting.
+    """
+    folds: list[MetaFold] = []
+    for position, (tr, va) in enumerate(splits):
+        report_progress(progress, f"  preparing isolated meta fold {position + 1}/{len(splits)}")
+        strata = composite_strata(y[tr], accepted[tr])
+        n_splits = resolve_n_splits(
+            strata, groups[tr], int(config.cv["inner_folds"]),
+            int(config.cv["min_inner_folds"]),
+            f"base-within-meta (meta fold {position + 1})",
+        )
+        base_splits = grouped_splits(
+            strata, groups[tr], n_splits, config.seed, bool(config.cv.get("shuffle", True))
+        )
+        best_params = {
+            learner: tune_base_learner(
+                learner, X[tr], y[tr], accepted[tr], groups[tr],
+                base_splits, config, progress,
+            ).best_params
+            for learner in config.base_learners
+        }
+        train_probabilities = base_oof_matrix(
+            best_params, X[tr], y[tr], accepted[tr], groups[tr], base_splits, config
+        )
+        val_probabilities = np.column_stack([
+            fit_base(
+                learner, best_params[learner], X[tr], y[tr], accepted[tr], groups[tr], config
+            ).predict_proba(X[va])
+            for learner in config.base_learners
+        ])
+        folds.append(MetaFold(tr, va, train_probabilities, val_probabilities))
+    return folds
+
+
+def crossfit_meta_predictions(
+    folds: Sequence[MetaFold],
+    y: np.ndarray,
+    accepted: np.ndarray,
+    groups: np.ndarray,
+    config: Config,
     params: dict[str, Any] | None = None,
 ) -> np.ndarray:
     """Cross-fitted meta probabilities for accepted rows; NaN elsewhere.
 
-    The meta-model is cross-fitted as well as the bases so the threshold is
-    never chosen on predictions the meta-model has already seen.
+    Each meta fit uses inputs prepared without its validation stars. The caller
+    supplies C selected by tuning over these folds; this does not add another
+    level of cross-validation for hyperparameter selection itself.
     """
-    predictions = np.full(P.shape[0], np.nan, dtype=float)
-    for tr, va in splits:
+    predictions = np.full(y.shape[0], np.nan, dtype=float)
+    for fold in folds:
+        tr, va = fold.train_rows, fold.val_rows
         train_rows = tr[accepted[tr]]
         val_rows = va[accepted[va]]
         if val_rows.size == 0:
             continue
         if train_rows.size == 0 or np.unique(y[train_rows]).size < 2:
             continue
-        meta = fit_meta(P[train_rows], y[train_rows], groups[train_rows], config, params)
-        predictions[val_rows] = np.asarray(meta.predict_proba(P[val_rows]))[:, 1]
+        meta = fit_meta(
+            fold.train_probabilities[accepted[tr]],
+            y[train_rows], groups[train_rows], config, params,
+        )
+        predictions[val_rows] = np.asarray(
+            meta.predict_proba(fold.val_probabilities[accepted[va]])
+        )[:, 1]
     return predictions
 
 
@@ -554,10 +628,10 @@ def fit_stack(
     """Tune, cross-fit, and assemble the stack on one training set.
 
     Steps, in order: tune each base learner by inner grouped CV; build
-    out-of-fold base probabilities; tune the meta-model by grouped CV; cross-fit
-    it over the same folds to obtain honest training-side predictions; choose
-    the recall-floor threshold from those; then refit the meta-model on all
-    accepted rows and the bases on all rows.
+    out-of-fold base probabilities; prepare independent base pipelines within
+    each meta-training partition; tune and cross-fit the meta-model with those
+    isolated inputs; choose the recall-floor threshold; then refit the
+    meta-model on all accepted rows and the bases on all rows.
     """
     strata = composite_strata(y, accepted)
     cv = config.cv
@@ -577,15 +651,17 @@ def fit_stack(
     report_progress(progress, "  building out-of-fold base probabilities")
     base_oof = base_oof_matrix(best_params, X, y, accepted, groups, splits, config)
 
+    meta_folds = prepare_meta_folds(X, y, accepted, groups, splits, config, progress)
+
     report_progress(progress, "  tuning the meta-model")
     tuning["meta"] = tune_meta_learner(
-        base_oof, y, accepted, groups, splits, config, progress
+        meta_folds, y, accepted, groups, config, progress
     )
     best_params["meta"] = tuning["meta"].best_params
 
     report_progress(progress, "  cross-fitting the meta-model")
     meta_crossfit = crossfit_meta_predictions(
-        base_oof, y, accepted, groups, splits, config, best_params["meta"]
+        meta_folds, y, accepted, groups, config, best_params["meta"]
     )
 
     thresholds = _choose_thresholds(base_oof, meta_crossfit, y, accepted, groups, config)

@@ -125,7 +125,9 @@ def validate(
 def evaluate(
     data_dir: DataDir,
     output_dir: Annotated[
-        Path, typer.Option("--output-dir", help="Where the evaluation report is written.")
+        Path, typer.Option(
+            "--output-dir", help="Base directory; each report gets a timestamped run subdirectory."
+        )
     ],
     config: ConfigOpt = None,
     schema: SchemaOpt = None,
@@ -155,17 +157,33 @@ def evaluate(
     metric = resolved.selection["metric"]
     scores = result.selection_scores(metric)
     would_ship = result.would_ship()
+    fold_ap = result.fold_ap_summary()
 
     _echo("")
-    _echo(f"{'model':22s} {'precision':>10s} {'recall':>8s} {'F2':>8s} {'AP':>8s} {'ROC-AUC':>8s}")
+    _echo(
+        f"{'model':22s} {'precision':>10s} {'recall':>8s} {'F2':>8s} "
+        f"{'AP pooled':>10s} {'AP mean':>8s} {'ROC-AUC':>8s}"
+    )
     for name in reported_models(resolved):
         metrics = result.pooled_metrics[name]
         marker = " *" if name == would_ship else "  "
         _echo(
             f"{name:20s}{marker} {_fmt(metrics['precision']):>10s} "
             f"{_fmt(metrics['recall']):>8s} {_fmt(metrics['f2']):>8s} "
-            f"{_fmt(metrics['average_precision']):>8s} {_fmt(metrics['roc_auc']):>8s}"
+            f"{_fmt(metrics['average_precision']):>10s} {_fmt(fold_ap[name]['mean']):>8s} "
+            f"{_fmt(metrics['roc_auc']):>8s}"
         )
+    _echo("\nIndividual outer-fold AP (AP mean averages scorable folds equally):")
+    fold_table = result.fold_ap_table().pivot(
+        index="model", columns="outer_fold", values="average_precision"
+    )
+    _echo(f"{'model':22s} " + " ".join(
+        f"{'fold ' + str(index):>8s}" for index in range(result.n_outer_folds)
+    ))
+    for name in reported_models(resolved):
+        _echo(f"{name:22s} " + " ".join(
+            f"{_fmt(fold_table.loc[name, index]):>8s}" for index in range(result.n_outer_folds)
+        ))
     _echo("")
     _echo(f"* highest {metric}; `train` would ship this model")
 
@@ -175,7 +193,7 @@ def evaluate(
     margin = ranked[0][1] - ranked[1][1] if len(ranked) > 1 else None
     _report_selection_bias(margin, len(resolved.selection_candidates))
 
-    _echo(f"\nWrote {len(written)} files to {output_dir}")
+    _echo(f"\nWrote {len(written)} files to {written[0].parent}")
 
 
 def _report_selection_bias(margin: float | None, n_candidates: int) -> None:

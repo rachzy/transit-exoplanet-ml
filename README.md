@@ -86,10 +86,29 @@ uv run exoplanet-ml predict \
 metrics; pass `--skip-evaluation` to skip that during iteration. Both `evaluate`
 and `train` accept `--config` and `--schema` to override the packaged YAML.
 
-`evaluate --output-dir` writes `metrics.json`, `model_comparison.csv`,
-`oof_predictions.csv`, `per_star.csv`, `permutation_importance.csv` and its
-summary, `provenance.json`, and a `plots/` directory. `train` nests the same set
-under `evaluation/` inside the run directory.
+`evaluate --output-dir reports/nested-cv` creates a new directory such as
+`reports/nested-cv/20260907T143000Z-a1b2c3d4/` for every run. The timestamp is
+UTC; the unique suffix separates runs created in the same second. The CLI
+prints the actual destination, and existing reports are preserved.
+
+Each run writes `metrics.json`, `model_comparison.csv`,
+`fold_average_precision.csv`, `oof_predictions.csv`, `per_star.csv`,
+`permutation_importance.csv` and its summary, `provenance.json`, and a `plots/`
+directory. `train` nests the same set under `evaluation/` inside its existing
+timestamped run directory.
+
+AP reporting distinguishes **pooled AP** (all outer-fold predictions combined)
+from **mean fold AP** (the arithmetic mean of individual outer-fold APs).
+`metrics.json` includes `fold_ap_summary` with the mean, sample standard
+deviation, and valid/total fold counts; individual APs remain in `fold_metrics`
+and are exported with candidate counts in `fold_average_precision.csv`.
+`model_comparison.csv` adds `mean_fold_average_precision`,
+`std_fold_average_precision`, and `n_valid_ap_folds`. The CLI and
+`plots/average_precision.png` show both summaries and individual folds.
+Unscorable APs are excluded from the mean and saved as JSON `null` / blank CSV
+cells. Each fold retains the configured candidate weighting; folds receive
+equal weight in the mean. Model selection continues to use the configured
+pooled score and recall floor.
 
 ### Prediction output
 

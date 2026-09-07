@@ -129,8 +129,12 @@ def fast_config() -> Config:
     data = copy.deepcopy(base)
     for name in data["models"]:
         data["models"][name]["n_candidates"] = 2
-    data["models"]["extra_trees"]["fixed"]["n_estimators"] = 25
-    data["models"]["lightgbm"]["grid"]["n_estimators"] = [25]
+    if "extra_trees" in data["models"]:
+        data["models"]["extra_trees"]["fixed"]["n_estimators"] = 25
+    if "lightgbm" in data["models"]:
+        data["models"]["lightgbm"]["grid"]["n_estimators"] = [25]
+    if "catboost" in data["models"]:
+        data["models"]["catboost"]["grid"]["iterations"] = [25]
     if "svm_rbf" in data["models"]:
         data["models"]["svm_rbf"]["calibration"]["cv"] = 3
     data["meta"]["n_candidates"] = 2

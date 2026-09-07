@@ -166,6 +166,38 @@ def model_comparison_plot(table: pd.DataFrame, path: Path) -> Path:
     return _save(fig, path)
 
 
+def average_precision_plot(result: Any, path: Path) -> Path:
+    """Show within-fold ranking separately from pooled prediction ranking."""
+    fig, (fold_ax, summary_ax) = plt.subplots(1, 2, figsize=(11, 4.5), sharey=True)
+    table = result.fold_ap_table()
+    summary = result.fold_ap_summary()
+    for name, rows in table.groupby("model", sort=False):
+        line, = fold_ax.plot(
+            rows["outer_fold"], rows["average_precision"], marker="o", label=name
+        )
+        summary_ax.plot(
+            [0, 1], [summary[name]["mean"], result.pooled_metrics[name]["average_precision"]],
+            marker="o", color=line.get_color(), label=name,
+        )
+    fold_ax.set_xticks(range(result.n_outer_folds))
+    fold_ax.set_xlabel("Outer fold (zero-based)")
+    fold_ax.set_ylabel("Average precision")
+    fold_ax.set_title("Individual outer folds")
+    summary_ax.set_xticks([0, 1], ["Mean fold AP", "Pooled AP"])
+    summary_ax.set_xlim(-0.3, 1.3)
+    summary_ax.set_title("Equal-fold mean versus pooled predictions")
+    summary_ax.legend(fontsize=8)
+    for ax in (fold_ax, summary_ax):
+        ax.set_ylim(0, 1.05)
+        ax.grid(alpha=0.3)
+    weighting = (
+        "star-weighted" if result.config["objective"].get("weighted_metrics", True)
+        else "unweighted"
+    )
+    fig.suptitle(f"Accepted-candidate AP ({weighting} within each evaluation subset)")
+    return _save(fig, path)
+
+
 def write_all(result: Any, directory: Path) -> list[Path]:
     """Render the full figure set for an evaluation result."""
     directory.mkdir(parents=True, exist_ok=True)
@@ -182,5 +214,6 @@ def write_all(result: Any, directory: Path) -> list[Path]:
         ),
         importance_plot(result.importance_summary(), directory / "permutation_importance.png"),
         model_comparison_plot(result.comparison_table(), directory / "model_comparison.png"),
+        average_precision_plot(result, directory / "average_precision.png"),
     ]
     return paths
