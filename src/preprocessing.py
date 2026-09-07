@@ -97,6 +97,7 @@ def _scaled_pipeline() -> Pipeline:
 
 _BUILDERS = {
     "lightgbm": _identity_pipeline,
+    "catboost": _identity_pipeline,
     "extra_trees": _imputed_pipeline,
     "svm_rbf": _scaled_pipeline,
     "logistic_regression": _scaled_pipeline,

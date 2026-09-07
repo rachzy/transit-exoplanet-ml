@@ -25,6 +25,7 @@ TRACKED_PACKAGES = (
     "scipy",
     "scikit-learn",
     "lightgbm",
+    "catboost",
     "joblib",
     "pyyaml",
     "matplotlib",

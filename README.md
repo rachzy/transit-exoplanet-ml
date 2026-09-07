@@ -95,7 +95,7 @@ under `evaluation/` inside the run directory.
 
 The CSV keeps every original candidate column and appends:
 
-`source_file`, `star_id`, `row_index`, `prob_lightgbm`, `prob_extra_trees`,
+`source_file`, `star_id`, `row_index`, `prob_lightgbm`, `prob_catboost`, `prob_extra_trees`,
 `prob_svm_rbf`, `prob_logistic_regression`, `prob_stack`,
 `potential_probability`, `decision_threshold`, `prediction` (`POTENTIAL` /
 `UNLIKELY`), `model_name`, `model_run_id`.
@@ -155,6 +155,7 @@ that uses it and persisted with the bundle:
 | Learner | Preprocessing |
 | --- | --- |
 | LightGBM | none — native missing-value handling |
+| CatBoost | none — native missing-value handling |
 | ExtraTrees | drop fold-local degenerates → median imputation + missing indicators |
 | RBF SVM, logistic regression | the above, then robust scaling |
 
@@ -192,7 +193,7 @@ solely on held-out stars and aggregated across folds.
 
 Tuning is conservative and seeded (`seed: 42`), scored by accepted-candidate
 average precision: 6 logistic-regression candidates, 24 each for the RBF SVM,
-ExtraTrees (500 trees), and LightGBM. The meta-model remains L2, with its `C`
+ExtraTrees (500 trees), LightGBM, and CatBoost. The meta-model remains L2, with its `C`
 selected from the configured grid using the same grouped inner CV.
 
 ## Artifacts

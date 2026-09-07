@@ -7,6 +7,7 @@ from math import prod
 from typing import Any
 
 import numpy as np
+from catboost import CatBoostClassifier
 from lightgbm import LGBMClassifier
 from sklearn.base import BaseEstimator
 from sklearn.calibration import CalibratedClassifierCV
@@ -25,6 +26,7 @@ _ESTIMATORS: dict[str, type[BaseEstimator]] = {
     "svm_rbf": SVC,
     "extra_trees": ExtraTreesClassifier,
     "lightgbm": LGBMClassifier,
+    "catboost": CatBoostClassifier,
 }
 
 
