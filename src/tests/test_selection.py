@@ -123,9 +123,9 @@ def test_selection_changes_what_predict_proba_serves(dataset, fast_config):
 
 
 def test_every_candidate_keeps_a_threshold(dataset, fast_config):
-    y, accepted = dataset.require_supervision()
+    y = dataset.require_supervision()
     fit = fit_stack(
-        dataset.X, y, accepted, dataset.star_id, fast_config, dataset.feature_names
+        dataset.X, y, dataset.star_id, fast_config, dataset.feature_names
     )
     assert set(fit.stack.thresholds) == {"stack", *fast_config.base_learners}
 

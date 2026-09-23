@@ -23,7 +23,6 @@ class FeatureSchema:
     status_column: str
     label_mapping: dict[str, int]
     valid_statuses: tuple[str, ...]
-    accepted_status: str
     feature_columns: tuple[str, ...]
     excluded_columns: dict[str, tuple[str, ...]]
     required_columns: dict[str, tuple[str, ...]]
@@ -59,7 +58,6 @@ class FeatureSchema:
             "status_column": self.status_column,
             "label_mapping": dict(self.label_mapping),
             "valid_statuses": list(self.valid_statuses),
-            "accepted_status": self.accepted_status,
             "feature_columns": list(self.feature_columns),
             "excluded_columns": {k: list(v) for k, v in self.excluded_columns.items()},
             "required_columns": {k: list(v) for k, v in self.required_columns.items()},
@@ -95,7 +93,6 @@ def load_schema(path: str | Path | None = None) -> FeatureSchema:
             status_column=str(data["status_column"]),
             label_mapping={str(k): int(v) for k, v in data["label_mapping"].items()},
             valid_statuses=tuple(str(s) for s in data["valid_statuses"]),
-            accepted_status=str(data["accepted_status"]),
             feature_columns=tuple(str(c) for c in data["feature_columns"]),
             excluded_columns={
                 str(k): tuple(str(c) for c in v)
@@ -124,12 +121,6 @@ def _check_schema_consistency(schema: FeatureSchema) -> None:
     if overlap:
         raise ConfigError(
             f"Columns appear in both feature_columns and excluded_columns: {sorted(overlap)}"
-        )
-
-    if schema.accepted_status not in schema.valid_statuses:
-        raise ConfigError(
-            f"accepted_status {schema.accepted_status!r} is not in valid_statuses "
-            f"{list(schema.valid_statuses)}."
         )
 
     if set(schema.label_mapping.values()) != {0, 1}:

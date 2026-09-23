@@ -54,7 +54,7 @@ def calibration_plot(
                 alpha=1.0 if name == selected else 0.6, label=_label(name, selected))
     ax.set_xlabel("mean predicted probability")
     ax.set_ylabel("observed CONFIRMED rate")
-    ax.set_title("Calibration on held-out stars (accepted candidates)")
+    ax.set_title("Calibration on held-out stars")
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3)
     return _save(fig, path)
@@ -73,7 +73,7 @@ def pr_curve_plot(oof: pd.DataFrame, path: Path, selected: str) -> Path:
     ax.axhline(y.mean(), color="k", ls=":", lw=1, label="base rate")
     ax.set_xlabel("recall")
     ax.set_ylabel("precision")
-    ax.set_title("Precision-recall on held-out stars (accepted candidates)")
+    ax.set_title("Precision-recall on held-out stars")
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3)
     return _save(fig, path)
@@ -92,7 +92,7 @@ def roc_curve_plot(oof: pd.DataFrame, path: Path, selected: str) -> Path:
     ax.plot([0, 1], [0, 1], "k--", lw=1)
     ax.set_xlabel("false positive rate")
     ax.set_ylabel("true positive rate")
-    ax.set_title("ROC on held-out stars (accepted candidates)")
+    ax.set_title("ROC on held-out stars")
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3)
     return _save(fig, path)
@@ -116,7 +116,7 @@ def probability_histogram(
         label=f"mean fold threshold = {mean_threshold:.4f}",
     )
     ax.set_xlabel(f"cross-fitted potential_probability ({selected})")
-    ax.set_ylabel("accepted candidates")
+    ax.set_ylabel("candidates")
     ax.set_title(f"Score separation on held-out stars ({selected})")
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3)
@@ -139,7 +139,7 @@ def importance_plot(summary: pd.DataFrame, path: Path, top_n: int = 20) -> Path:
         capsize=2,
     )
     ax.axvline(0, color="k", lw=1)
-    ax.set_xlabel("drop in accepted-candidate average precision")
+    ax.set_xlabel("drop in average precision")
     ax.set_title(f"Permutation importance on held-out stars (top {min(top_n, len(top))})")
     ax.grid(alpha=0.3, axis="x")
     return _save(fig, path)
@@ -194,7 +194,7 @@ def average_precision_plot(result: Any, path: Path) -> Path:
         "star-weighted" if result.config["objective"].get("weighted_metrics", True)
         else "unweighted"
     )
-    fig.suptitle(f"Accepted-candidate AP ({weighting} within each evaluation subset)")
+    fig.suptitle(f"Average precision ({weighting} within each evaluation subset)")
     return _save(fig, path)
 
 

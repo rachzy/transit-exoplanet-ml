@@ -18,11 +18,11 @@ from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.pipeline import Pipeline
 
 from .config import Config
-from .data import composite_strata, star_balanced_weights
+from .data import star_balanced_weights
 from .errors import DataDiversityError
 from .metrics import (
     ThresholdChoice,
-    accepted_average_precision,
+    safe_average_precision,
     select_threshold,
 )
 from .models import (
@@ -78,10 +78,9 @@ def resolve_n_splits(
     thin = {s: c for s, c in support.items() if c < minimum}
     raise DataDiversityError(
         f"Cannot build {minimum} {level} folds grouped by star: "
-        f"{n_groups} stars available; distinct stars per (label, acceptance) stratum "
-        f"{support}; strata below the {minimum}-star minimum: {thin}. "
-        "Add stars covering the under-represented combinations of candidate_label "
-        "and detection_status."
+        f"{n_groups} stars available; distinct stars per label {support}; "
+        f"strata below the {minimum}-star minimum: {thin}. "
+        "Add stars covering the under-represented candidate_label values."
     )
 
 
@@ -189,18 +188,14 @@ def fit_base(
     params: dict[str, Any],
     X: np.ndarray,
     y: np.ndarray,
-    accepted: np.ndarray,
     groups: np.ndarray,
     config: Config,
 ) -> FittedBase:
-    """Fit a base learner on all rows, emphasizing accepted candidates."""
+    """Fit a base learner on every row, with equal weight per star."""
     preprocessor = build_preprocessor(learner)
     transformed = preprocessor.fit_transform(X)
     estimator = build_estimator(learner, params, config)
-    row_multipliers = np.where(
-        np.asarray(accepted, dtype=bool), config.accepted_candidate_multiplier, 1.0
-    )
-    weights = star_balanced_weights(groups, row_multipliers=row_multipliers)
+    weights = star_balanced_weights(groups)
     estimator.fit(transformed, y, sample_weight=weights)
     return FittedBase(
         learner=learner, params=dict(params), preprocessor=preprocessor, estimator=estimator
@@ -214,7 +209,7 @@ def fit_meta(
     config: Config,
     params: dict[str, Any] | None = None,
 ) -> LogisticRegression:
-    """Fit the meta-model on base probabilities for accepted rows only."""
+    """Fit the meta-model on base probabilities for every row."""
     meta = build_meta_estimator(config, params=params)
     meta.fit(P, y, sample_weight=star_balanced_weights(groups))
     return meta
@@ -243,35 +238,30 @@ class TuningResult:
 def _score_fold(
     y: np.ndarray,
     prob: np.ndarray,
-    accepted: np.ndarray,
     groups: np.ndarray,
     metric: str,
     min_recall: float,
     weighted: bool,
 ) -> float:
-    """Configured tuning score restricted to accepted candidates."""
-    mask = accepted
-    if mask.sum() == 0:
+    """Configured tuning score for one validation fold."""
+    if y.size == 0:
         return float("nan")
-    weights = star_balanced_weights(groups[mask]) if weighted else None
+    weights = star_balanced_weights(groups) if weighted else None
     if metric == "average_precision":
-        return accepted_average_precision(y[mask], prob[mask], sample_weight=weights)
-    return select_threshold(
-        y[mask], prob[mask], min_recall, sample_weight=weights
-    ).precision
+        return safe_average_precision(y, prob, sample_weight=weights)
+    return select_threshold(y, prob, min_recall, sample_weight=weights).precision
 
 
 def tune_base_learner(
     learner: str,
     X: np.ndarray,
     y: np.ndarray,
-    accepted: np.ndarray,
     groups: np.ndarray,
     splits: Sequence[Split],
     config: Config,
     progress: Progress = None,
 ) -> TuningResult:
-    """Pick hyper-parameters by mean accepted-candidate average precision."""
+    """Pick hyper-parameters by mean average precision over every candidate."""
     grid = candidate_params(learner, config)
     weighted = config.weighted_metrics
     records: list[dict[str, Any]] = []
@@ -279,15 +269,12 @@ def tune_base_learner(
     for position, params in enumerate(grid):
         scores: list[float] = []
         for tr, va in splits:
-            fitted = fit_base(
-                learner, params, X[tr], y[tr], accepted[tr], groups[tr], config
-            )
+            fitted = fit_base(learner, params, X[tr], y[tr], groups[tr], config)
             prob = fitted.predict_proba(X[va])
             scores.append(
                 _score_fold(
                     y[va],
                     prob,
-                    accepted[va],
                     groups[va],
                     config.objective_metric,
                     config.min_recall,
@@ -313,8 +300,8 @@ def tune_base_learner(
     if not scored:
         raise DataDiversityError(
             f"No hyper-parameter candidate for {learner!r} could be scored: every inner "
-            "validation fold lacked accepted candidates of both classes. Add stars with "
-            "accepted CONFIRMED and accepted FALSE-POSITIVE candidates."
+            "validation fold lacked candidates of both classes. Add stars with "
+            "CONFIRMED and FALSE-POSITIVE candidates."
         )
     # Ties resolve to the earlier candidate, keeping selection deterministic.
     best = max(scored, key=lambda r: (r["mean_score"], -r["rank_order"]))
@@ -345,7 +332,6 @@ class MetaFold:
 def tune_meta_learner(
     folds: Sequence[MetaFold],
     y: np.ndarray,
-    accepted: np.ndarray,
     groups: np.ndarray,
     config: Config,
     progress: Progress = None,
@@ -359,27 +345,23 @@ def tune_meta_learner(
         scores: list[float] = []
         for fold in folds:
             tr, va = fold.train_rows, fold.val_rows
-            train_rows = tr[accepted[tr]]
-            val_rows = va[accepted[va]]
-            if train_rows.size == 0 or val_rows.size == 0:
+            if tr.size == 0 or va.size == 0:
                 scores.append(float("nan"))
                 continue
-            if np.unique(y[train_rows]).size < 2:
+            if np.unique(y[tr]).size < 2:
                 scores.append(float("nan"))
                 continue
             meta = fit_meta(
-                fold.train_probabilities[accepted[tr]],
-                y[train_rows], groups[train_rows], config, params
+                fold.train_probabilities, y[tr], groups[tr], config, params
             )
             probability = np.asarray(
-                meta.predict_proba(fold.val_probabilities[accepted[va]])
+                meta.predict_proba(fold.val_probabilities)
             )[:, 1]
             scores.append(
                 _score_fold(
-                    y[val_rows],
+                    y[va],
                     probability,
-                    np.ones(val_rows.size, dtype=bool),
-                    groups[val_rows],
+                    groups[va],
                     config.objective_metric,
                     config.min_recall,
                     weighted,
@@ -404,7 +386,7 @@ def tune_meta_learner(
     if not scored:
         raise DataDiversityError(
             "No hyper-parameter candidate for the meta-model could be scored: every "
-            "inner validation fold lacked accepted candidates of both classes."
+            "inner validation fold lacked candidates of both classes."
         )
     best = max(
         scored, key=lambda record: (record["mean_score"], -record["rank_order"])
@@ -424,7 +406,6 @@ def base_oof_matrix(
     best_params: dict[str, dict[str, Any]],
     X: np.ndarray,
     y: np.ndarray,
-    accepted: np.ndarray,
     groups: np.ndarray,
     splits: Sequence[Split],
     config: Config,
@@ -439,7 +420,6 @@ def base_oof_matrix(
                 best_params[learner],
                 X[tr],
                 y[tr],
-                accepted[tr],
                 groups[tr],
                 config,
             )
@@ -456,7 +436,6 @@ def base_oof_matrix(
 def prepare_meta_folds(
     X: np.ndarray,
     y: np.ndarray,
-    accepted: np.ndarray,
     groups: np.ndarray,
     splits: Sequence[Split],
     config: Config,
@@ -473,28 +452,27 @@ def prepare_meta_folds(
     folds: list[MetaFold] = []
     for position, (tr, va) in enumerate(splits):
         report_progress(progress, f"  preparing isolated meta fold {position + 1}/{len(splits)}")
-        strata = composite_strata(y[tr], accepted[tr])
         n_splits = resolve_n_splits(
-            strata, groups[tr], int(config.cv["inner_folds"]),
+            y[tr], groups[tr], int(config.cv["inner_folds"]),
             int(config.cv["min_inner_folds"]),
             f"base-within-meta (meta fold {position + 1})",
         )
         base_splits = grouped_splits(
-            strata, groups[tr], n_splits, config.seed, bool(config.cv.get("shuffle", True))
+            y[tr], groups[tr], n_splits, config.seed, bool(config.cv.get("shuffle", True))
         )
         best_params = {
             learner: tune_base_learner(
-                learner, X[tr], y[tr], accepted[tr], groups[tr],
+                learner, X[tr], y[tr], groups[tr],
                 base_splits, config, progress,
             ).best_params
             for learner in config.base_learners
         }
         train_probabilities = base_oof_matrix(
-            best_params, X[tr], y[tr], accepted[tr], groups[tr], base_splits, config
+            best_params, X[tr], y[tr], groups[tr], base_splits, config
         )
         val_probabilities = np.column_stack([
             fit_base(
-                learner, best_params[learner], X[tr], y[tr], accepted[tr], groups[tr], config
+                learner, best_params[learner], X[tr], y[tr], groups[tr], config
             ).predict_proba(X[va])
             for learner in config.base_learners
         ])
@@ -505,12 +483,11 @@ def prepare_meta_folds(
 def crossfit_meta_predictions(
     folds: Sequence[MetaFold],
     y: np.ndarray,
-    accepted: np.ndarray,
     groups: np.ndarray,
     config: Config,
     params: dict[str, Any] | None = None,
 ) -> np.ndarray:
-    """Cross-fitted meta probabilities for accepted rows; NaN elsewhere.
+    """Cross-fitted meta probabilities for every row.
 
     Each meta fit uses inputs prepared without its validation stars. The caller
     supplies C selected by tuning over these folds; this does not add another
@@ -519,18 +496,15 @@ def crossfit_meta_predictions(
     predictions = np.full(y.shape[0], np.nan, dtype=float)
     for fold in folds:
         tr, va = fold.train_rows, fold.val_rows
-        train_rows = tr[accepted[tr]]
-        val_rows = va[accepted[va]]
-        if val_rows.size == 0:
+        if va.size == 0:
             continue
-        if train_rows.size == 0 or np.unique(y[train_rows]).size < 2:
+        if tr.size == 0 or np.unique(y[tr]).size < 2:
             continue
         meta = fit_meta(
-            fold.train_probabilities[accepted[tr]],
-            y[train_rows], groups[train_rows], config, params,
+            fold.train_probabilities, y[tr], groups[tr], config, params,
         )
-        predictions[val_rows] = np.asarray(
-            meta.predict_proba(fold.val_probabilities[accepted[va]])
+        predictions[va] = np.asarray(
+            meta.predict_proba(fold.val_probabilities)
         )[:, 1]
     return predictions
 
@@ -608,7 +582,7 @@ def select_best_model(
                 f"No candidate model met the recall floor of {min_recall:.3f}."
             )
         raise DataDiversityError(
-            "No candidate model could be scored for selection. This needs accepted "
+            "No candidate model could be scored for selection. This needs "
             "candidates of both classes in the held-out folds."
         )
     best = max(scored, key=lambda item: (item[1], -order.index(item[0])))
@@ -618,7 +592,6 @@ def select_best_model(
 def fit_stack(
     X: np.ndarray,
     y: np.ndarray,
-    accepted: np.ndarray,
     groups: np.ndarray,
     config: Config,
     feature_names: Sequence[str],
@@ -631,54 +604,44 @@ def fit_stack(
     out-of-fold base probabilities; prepare independent base pipelines within
     each meta-training partition; tune and cross-fit the meta-model with those
     isolated inputs; choose the recall-floor threshold; then refit the
-    meta-model on all accepted rows and the bases on all rows.
+    meta-model and the bases on every row.
     """
-    strata = composite_strata(y, accepted)
     cv = config.cv
     n_splits = n_inner_splits or resolve_n_splits(
-        strata, groups, int(cv["inner_folds"]), int(cv["min_inner_folds"]), "inner"
+        y, groups, int(cv["inner_folds"]), int(cv["min_inner_folds"]), "inner"
     )
-    splits = grouped_splits(strata, groups, n_splits, config.seed, bool(cv.get("shuffle", True)))
+    splits = grouped_splits(y, groups, n_splits, config.seed, bool(cv.get("shuffle", True)))
 
     tuning: dict[str, TuningResult] = {}
     for learner in config.base_learners:
         report_progress(progress, f"  tuning {learner} ({n_splits} inner folds)")
         tuning[learner] = tune_base_learner(
-            learner, X, y, accepted, groups, splits, config, progress
+            learner, X, y, groups, splits, config, progress
         )
     best_params = {name: result.best_params for name, result in tuning.items()}
 
     report_progress(progress, "  building out-of-fold base probabilities")
-    base_oof = base_oof_matrix(best_params, X, y, accepted, groups, splits, config)
+    base_oof = base_oof_matrix(best_params, X, y, groups, splits, config)
 
-    meta_folds = prepare_meta_folds(X, y, accepted, groups, splits, config, progress)
+    meta_folds = prepare_meta_folds(X, y, groups, splits, config, progress)
 
     report_progress(progress, "  tuning the meta-model")
     tuning["meta"] = tune_meta_learner(
-        meta_folds, y, accepted, groups, config, progress
+        meta_folds, y, groups, config, progress
     )
     best_params["meta"] = tuning["meta"].best_params
 
     report_progress(progress, "  cross-fitting the meta-model")
     meta_crossfit = crossfit_meta_predictions(
-        meta_folds, y, accepted, groups, config, best_params["meta"]
+        meta_folds, y, groups, config, best_params["meta"]
     )
 
-    thresholds = _choose_thresholds(base_oof, meta_crossfit, y, accepted, groups, config)
+    thresholds = _choose_thresholds(base_oof, meta_crossfit, y, groups, config)
 
     report_progress(progress, "  refitting base learners and meta-model on the full training set")
-    accepted_rows = np.flatnonzero(accepted)
-    meta = fit_meta(
-        base_oof[accepted_rows],
-        y[accepted_rows],
-        groups[accepted_rows],
-        config,
-        best_params["meta"],
-    )
+    meta = fit_meta(base_oof, y, groups, config, best_params["meta"])
     bases = {
-        learner: fit_base(
-            learner, best_params[learner], X, y, accepted, groups, config
-        )
+        learner: fit_base(learner, best_params[learner], X, y, groups, config)
         for learner in config.base_learners
     }
 
@@ -707,18 +670,16 @@ def _choose_thresholds(
     base_oof: np.ndarray,
     meta_crossfit: np.ndarray,
     y: np.ndarray,
-    accepted: np.ndarray,
     groups: np.ndarray,
     config: Config,
 ) -> dict[str, ThresholdChoice]:
     """One recall-constrained threshold per model, from training rows only."""
-    usable = accepted & ~np.isnan(meta_crossfit)
-    rows = np.flatnonzero(usable)
+    rows = np.flatnonzero(~np.isnan(meta_crossfit))
     if rows.size == 0 or np.unique(y[rows]).size < 2:
         raise DataDiversityError(
-            "No cross-fitted accepted candidates of both classes were available for "
-            "threshold selection. Add stars with accepted CONFIRMED and accepted "
-            "FALSE-POSITIVE candidates."
+            "No cross-fitted candidates of both classes were available for "
+            "threshold selection. Add stars with CONFIRMED and FALSE-POSITIVE "
+            "candidates."
         )
     weights = star_balanced_weights(groups[rows]) if config.weighted_metrics else None
 

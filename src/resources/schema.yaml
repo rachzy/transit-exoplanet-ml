@@ -14,9 +14,6 @@ valid_statuses:
   - provisional
   - harmonic_duplicate
 
-# Only rows with this status train the meta-model and determine the threshold
-accepted_status: accepted
-
 # Only these columns will reach a model
 feature_columns:
   - period_days

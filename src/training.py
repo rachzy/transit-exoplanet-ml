@@ -24,7 +24,6 @@ from .artifacts import (
 from .config import SELECTION_STRATEGY_BEST, Config, load_config
 from .data import (
     Dataset,
-    composite_strata,
     load_dataset,
     star_balanced_weights,
 )
@@ -271,7 +270,7 @@ class TrainingRun:
 
 def _training_oof_frame(fit: StackFitResult, dataset: Dataset) -> pd.DataFrame:
     """Cross-fitted training predictions, one row per candidate."""
-    y, accepted = dataset.require_supervision()
+    y = dataset.require_supervision()
     probabilities = fit.training_probabilities()
     frame = pd.DataFrame(
         {
@@ -279,7 +278,6 @@ def _training_oof_frame(fit: StackFitResult, dataset: Dataset) -> pd.DataFrame:
             "star_id": dataset.star_id,
             "row_index": dataset.row_index,
             "detection_status": dataset.status,
-            "accepted": accepted,
             "y_true": y,
         }
     )
@@ -291,10 +289,8 @@ def _training_oof_frame(fit: StackFitResult, dataset: Dataset) -> pd.DataFrame:
     frame["model_name"] = selected
     frame["potential_probability"] = probabilities[selected]
     frame["decision_threshold"] = fit.threshold
-    flagged = accepted & (probabilities[selected] >= fit.threshold)
-    frame["prediction"] = np.where(
-        ~accepted, "", np.where(flagged, POTENTIAL, UNLIKELY)
-    )
+    flagged = probabilities[selected] >= fit.threshold
+    frame["prediction"] = np.where(flagged, POTENTIAL, UNLIKELY)
     return frame.sort_values(["source_file", "row_index"], kind="stable").reset_index(drop=True)
 
 
@@ -304,12 +300,11 @@ def _training_report(
     config: Config,
 ) -> dict[str, Any]:
     """Cross-fitted training diagnostics for the selected operating point."""
-    y, accepted = dataset.require_supervision()
+    y = dataset.require_supervision()
     groups = dataset.star_id
     probabilities = fit.training_probabilities()
 
-    usable = accepted & ~np.isnan(probabilities[STACK])
-    rows = np.flatnonzero(usable)
+    rows = np.flatnonzero(~np.isnan(probabilities[STACK]))
     weights = star_balanced_weights(groups[rows]) if config.weighted_metrics else None
 
     per_model: dict[str, Any] = {}
@@ -341,10 +336,10 @@ def _crossfit_scores(
     fit: StackFitResult, dataset: Dataset, config: Config, metric: str
 ) -> dict[str, float]:
     """Selection scores from the training set's own cross-fitted predictions."""
-    y, accepted = dataset.require_supervision()
+    y = dataset.require_supervision()
     groups = dataset.star_id
     probabilities = fit.training_probabilities()
-    rows = np.flatnonzero(accepted & ~np.isnan(probabilities[STACK]))
+    rows = np.flatnonzero(~np.isnan(probabilities[STACK]))
     weights = star_balanced_weights(groups[rows]) if config.weighted_metrics else None
     return {
         name: float(
@@ -360,10 +355,10 @@ def _crossfit_recalls(
     fit: StackFitResult, dataset: Dataset, config: Config
 ) -> dict[str, float]:
     """Recall of each candidate at its cross-fitted recall-floor threshold."""
-    y, accepted = dataset.require_supervision()
+    y = dataset.require_supervision()
     groups = dataset.star_id
     probabilities = fit.training_probabilities()
-    rows = np.flatnonzero(accepted & ~np.isnan(probabilities[STACK]))
+    rows = np.flatnonzero(~np.isnan(probabilities[STACK]))
     weights = star_balanced_weights(groups[rows]) if config.weighted_metrics else None
     return {
         name: float(
@@ -445,11 +440,10 @@ def train_model(
         report_progress(progress, "running nested evaluation before final training")
         evaluation = evaluate_dataset(dataset=dataset, config=config, progress=progress)
 
-    y, accepted = dataset.require_supervision()
+    y = dataset.require_supervision()
     groups = dataset.star_id
-    strata = composite_strata(y, accepted)
     n_folds = resolve_n_splits(
-        strata,
+        y,
         groups,
         int(config.cv.get("final_oof_folds", config.cv["inner_folds"])),
         int(config.cv["min_inner_folds"]),
@@ -460,7 +454,6 @@ def train_model(
     fit = fit_stack(
         dataset.X,
         y,
-        accepted,
         groups,
         config,
         dataset.feature_names,

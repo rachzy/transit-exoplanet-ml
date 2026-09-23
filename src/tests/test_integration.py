@@ -56,17 +56,17 @@ def test_evaluation_reports_every_model(evaluation):
     assert all(n >= 2 for n in evaluation.inner_folds_per_outer)
 
 
-def test_evaluation_scores_only_accepted_candidates(evaluation, train_dir, schema):
+def test_evaluation_scores_every_candidate(evaluation, train_dir, schema):
     dataset = load_dataset(train_dir, mode="train", schema=schema)
-    assert len(evaluation.oof_predictions) == int(dataset.accepted.sum())
+    assert len(evaluation.oof_predictions) == len(dataset)
 
 
-def test_every_accepted_row_is_predicted_exactly_once(evaluation, train_dir, schema):
+def test_every_row_is_predicted_exactly_once(evaluation, train_dir, schema):
     dataset = load_dataset(train_dir, mode="train", schema=schema)
     keys = set(
         zip(evaluation.oof_predictions["source_file"], evaluation.oof_predictions["row_index"])
     )
-    expected = set(zip(dataset.source_file[dataset.accepted], dataset.row_index[dataset.accepted]))
+    expected = set(zip(dataset.source_file, dataset.row_index))
     assert keys == expected
 
 
@@ -269,10 +269,10 @@ def test_training_meets_the_configured_recall_floor(trained):
     assert choice["recall"] >= trained.bundle.config["objective"]["min_recall"]
 
 
-def test_training_oof_frame_labels_accepted_rows_only(trained):
+def test_training_oof_frame_labels_every_row(trained):
     frame = pd.read_csv(trained.artifact_dir / "training_oof_predictions.csv")
-    assert set(frame.loc[frame["accepted"], "prediction"]) <= {POTENTIAL, UNLIKELY}
-    assert frame.loc[~frame["accepted"], "prediction"].isna().all()
+    assert set(frame["prediction"]) <= {POTENTIAL, UNLIKELY}
+    assert frame["prediction"].notna().all()
 
 
 # ---------------------------------------------------------------------------
@@ -402,12 +402,7 @@ def test_per_star_summary_covers_every_reported_model(evaluation, train_dir, sch
     frame = pd.DataFrame(evaluation.per_star)
     assert set(frame["model"]) == set(_model_names(evaluation))
 
-    stars_with_accepted = {
-        star
-        for star in dataset.stars
-        if dataset.accepted[dataset.star_id == star].any()
-    }
     for name in _model_names(evaluation):
         rows = frame[frame["model"] == name]
-        assert set(rows["star_id"]) == stars_with_accepted
-        assert (rows["n_flagged"] <= rows["n_accepted"]).all()
+        assert set(rows["star_id"]) == set(dataset.stars)
+        assert (rows["n_flagged"] <= rows["n_candidates"]).all()

@@ -110,7 +110,6 @@ def test_predict_mode_does_not_require_supervision(tmp_path, schema):
     write_synthetic_dataset(tmp_path, n_stars=3, seed=5, include_supervision=False)
     dataset = load_dataset(tmp_path, mode="predict", schema=schema)
     assert dataset.y is None
-    assert dataset.accepted is None
     assert len(dataset) > 0
 
 
@@ -186,11 +185,11 @@ def test_target_mapping(train_dir, schema):
     assert np.array_equal(dataset.y == 0, labels == "FALSE-POSITIVE")
 
 
-def test_acceptance_mask_matches_detection_status(train_dir, schema):
+def test_every_row_is_labelled_regardless_of_detection_status(train_dir, schema):
     dataset = load_dataset(train_dir, mode="train", schema=schema)
-    statuses = dataset.frame["detection_status"].to_numpy()
-    assert np.array_equal(dataset.accepted, statuses == "accepted")
-    assert dataset.accepted.sum() < len(dataset), "fixture should contain rejected rows"
+    statuses = dataset.status
+    assert "rejected" in statuses, "fixture should contain rejected rows"
+    assert dataset.y.size == len(dataset), "every row, not just accepted ones, gets a label"
 
 
 # ---------------------------------------------------------------------------
@@ -211,24 +210,12 @@ def test_star_weights_normalise_within_any_subset():
     assert pytest.approx(weights.mean()) == 1.0
 
 
-def test_row_multipliers_preserve_star_balance_and_emphasize_rows():
-    stars = np.array(["a", "a", "a", "b", "b"], dtype=object)
-    accepted = np.array([True, False, False, True, False])
-    multipliers = np.where(accepted, 5.0, 1.0)
-    weights = star_balanced_weights(stars, row_multipliers=multipliers)
-
-    assert weights[0] == pytest.approx(5.0 * weights[1])
-    assert weights[3] == pytest.approx(5.0 * weights[4])
-    assert weights[stars == "a"].sum() == pytest.approx(weights[stars == "b"].sum())
-    assert weights.mean() == pytest.approx(1.0)
-
-
-def test_star_weights_recomputed_for_the_accepted_subset(train_dir, schema):
-    """The equal-star property must hold for the accepted-only meta fit too."""
+def test_star_weights_recomputed_for_any_subset(train_dir, schema):
+    """The equal-star property must hold for any fitting subset, not just the full set."""
     dataset = load_dataset(train_dir, mode="train", schema=schema)
-    accepted_stars = dataset.star_id[dataset.accepted]
-    weights = star_balanced_weights(accepted_stars)
-    totals = [weights[accepted_stars == star].sum() for star in np.unique(accepted_stars)]
+    subset_stars = dataset.star_id[dataset.y == 1]
+    weights = star_balanced_weights(subset_stars)
+    totals = [weights[subset_stars == star].sum() for star in np.unique(subset_stars)]
     assert np.allclose(totals, totals[0])
 
 
@@ -255,5 +242,6 @@ def test_validate_dataset_returns_summary(train_dir, schema):
     summary = validate_dataset(train_dir, mode="train", schema=schema)
     assert summary["n_stars"] == 12
     assert summary["n_features"] == len(schema.feature_columns)
-    assert summary["n_accepted"] > 0
-    assert summary["n_rejected"] > 0
+    assert summary["n_positive"] > 0
+    assert summary["n_negative"] > 0
+    assert summary["status_counts"]["rejected"] > 0

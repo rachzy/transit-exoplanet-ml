@@ -23,7 +23,7 @@ SPARSE_FEATURE = "ingress_egress_asymmetry"
 
 
 def _candidate_plan(star_index: int, rng: np.random.Generator) -> list[tuple[str, str]]:
-    """(label, status) pairs guaranteeing support in all four strata."""
+    """(label, status) pairs covering both labels and a mix of detection statuses."""
     plan: list[tuple[str, str]] = [
         ("CONFIRMED", "accepted"),
         ("FALSE-POSITIVE", "accepted"),

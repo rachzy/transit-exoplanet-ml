@@ -12,16 +12,15 @@ import pandas as pd
 from .config import Config, load_config
 from .data import (
     Dataset,
-    composite_strata,
     load_dataset,
     star_balanced_weights,
 )
 from .metrics import (
     BootstrapResult,
-    accepted_average_precision,
     calibration_curve_points,
     compute_metrics,
     per_star_summary,
+    safe_average_precision,
     star_bootstrap_intervals,
 )
 from .schema import FeatureSchema
@@ -214,7 +213,6 @@ def _permutation_importance(
     result,
     X: np.ndarray,
     y: np.ndarray,
-    accepted: np.ndarray,
     groups: np.ndarray,
     feature_names: tuple[str, ...],
     config: Config,
@@ -223,23 +221,20 @@ def _permutation_importance(
     """Feature importance measured only on this fold's held-out stars."""
     settings = config.permutation_importance
     n_repeats = int(settings.get("n_repeats", 10))
-    rows = np.flatnonzero(accepted)
-    if rows.size == 0 or np.unique(y[rows]).size < 2:
+    if y.size == 0 or np.unique(y).size < 2:
         return []
 
-    weights = star_balanced_weights(groups[rows]) if config.weighted_metrics else None
+    weights = star_balanced_weights(groups) if config.weighted_metrics else None
 
     def score(matrix: np.ndarray) -> dict[str, float]:
-        """Accepted-candidate AP for every candidate model.
+        """AP for every candidate model.
 
         All six share one pass of base-learner predictions, so scoring them
         together costs little more than scoring one.
         """
         probabilities = result.stack.all_probabilities(matrix)
         return {
-            model: accepted_average_precision(
-                y[rows], values[rows], sample_weight=weights
-            )
+            model: safe_average_precision(y, values, sample_weight=weights)
             for model, values in probabilities.items()
         }
 
@@ -283,18 +278,17 @@ def evaluate_dataset(
             raise ValueError("Provide either data_dir or dataset.")
         dataset = load_dataset(data_dir, mode="train", schema=schema)
 
-    y, accepted = dataset.require_supervision()
+    y = dataset.require_supervision()
     X = dataset.X
     groups = dataset.star_id
-    strata = composite_strata(y, accepted)
     feature_names = dataset.feature_names
 
     cv = config.cv
     n_outer = resolve_n_splits(
-        strata, groups, int(cv["outer_folds"]), int(cv["min_outer_folds"]), "outer"
+        y, groups, int(cv["outer_folds"]), int(cv["min_outer_folds"]), "outer"
     )
     outer_splits = grouped_splits(
-        strata, groups, n_outer, config.seed, bool(cv.get("shuffle", True))
+        y, groups, n_outer, config.seed, bool(cv.get("shuffle", True))
     )
     report_progress(
         progress,
@@ -319,7 +313,6 @@ def evaluate_dataset(
         result = fit_stack(
             X[train_idx],
             y[train_idx],
-            accepted[train_idx],
             groups[train_idx],
             config,
             feature_names,
@@ -329,8 +322,7 @@ def evaluate_dataset(
         fold_best_params.append({"outer_fold": fold, "best_params": result.best_params})
 
         probabilities = model_probabilities(result, X[val_idx])
-        accepted_val = np.flatnonzero(accepted[val_idx])
-        val_rows = val_idx[accepted_val]
+        val_rows = val_idx
         weights = (
             star_balanced_weights(groups[val_rows]) if config.weighted_metrics else None
         )
@@ -348,7 +340,7 @@ def evaluate_dataset(
         for name in models:
             threshold = result.thresholds[name].threshold
             fold_thresholds[name].append(float(threshold))
-            probability = probabilities[name][accepted_val]
+            probability = probabilities[name]
             block[f"prob_{name}"] = probability
             block[f"threshold_{name}"] = threshold
             if val_rows.size and np.unique(y[val_rows]).size >= 1:
@@ -366,7 +358,6 @@ def evaluate_dataset(
                 result,
                 X[val_idx],
                 y[val_idx],
-                accepted[val_idx],
                 groups[val_idx],
                 feature_names,
                 config,

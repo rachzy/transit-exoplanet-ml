@@ -78,40 +78,19 @@ def discover_files(data_dir: str | Path) -> list[Path]:
 # ---------------------------------------------------------------------------
 # Weights
 # ---------------------------------------------------------------------------
-def composite_strata(y: np.ndarray, accepted: np.ndarray) -> np.ndarray:
-    """Label x acceptance strata, so grouped splits balance both at once."""
-    return (np.asarray(y, dtype=int) * 2 + np.asarray(accepted, dtype=int)).astype(int)
-
-
-def star_balanced_weights(
-    star_ids: np.ndarray | pd.Series,
-    row_multipliers: np.ndarray | pd.Series | None = None,
-) -> np.ndarray:
+def star_balanced_weights(star_ids: np.ndarray | pd.Series) -> np.ndarray:
     """Weights giving every star the same total, with a mean weight of 1.
 
-    Recomputed for each fitting subset so the property holds for that fit --
-    including the accepted-only meta-model fit, where stars contribute
-    different numbers of rows than they do to the base learners. Optional row
-    multipliers change the relative weight of rows *within* each star while
-    preserving equal total weight across stars.
+    Recomputed for each fitting subset so the property holds for that fit,
+    since stars can contribute different numbers of rows to different fits.
     """
     ids = np.asarray(star_ids)
     if ids.size == 0:
         return np.zeros(0, dtype=float)
-    if row_multipliers is None:
-        priorities = np.ones(ids.size, dtype=float)
-    else:
-        priorities = np.asarray(row_multipliers, dtype=float)
-        if priorities.shape != ids.shape:
-            raise ValueError(
-                f"Expected {ids.shape} row multipliers, got {priorities.shape}."
-            )
-        if not np.isfinite(priorities).all() or (priorities <= 0.0).any():
-            raise ValueError("Row multipliers must all be positive finite numbers.")
 
     unique, inverse = np.unique(ids, return_inverse=True)
-    totals = np.bincount(inverse, weights=priorities)
-    weights = priorities / totals[inverse]
+    counts = np.bincount(inverse)
+    weights = 1.0 / counts[inverse]
     return weights * (ids.size / float(len(unique)))
 
 
@@ -134,7 +113,6 @@ class Dataset:
     file_checksums: dict[str, str]
     y: np.ndarray | None = None
     status: np.ndarray | None = None
-    accepted: np.ndarray | None = None
 
     def __len__(self) -> int:
         return len(self.frame)
@@ -151,18 +129,14 @@ class Dataset:
     def X(self) -> np.ndarray:
         return self.features.to_numpy(dtype=float, copy=True)
 
-    def require_supervision(self) -> tuple[np.ndarray, np.ndarray]:
-        """Return ``(y, accepted)``, raising if the dataset is unlabelled."""
-        if self.y is None or self.accepted is None:
+    def require_supervision(self) -> np.ndarray:
+        """Return the label array, raising if the dataset is unlabelled."""
+        if self.y is None:
             raise DataValidationError(
                 "This dataset has no labels. Load it with mode='train' from a "
                 "directory whose files carry candidate_label and detection_status."
             )
-        return self.y, self.accepted
-
-    def composite_strata(self) -> np.ndarray:
-        """Label x acceptance strata used to stratify the grouped splits."""
-        return composite_strata(*self.require_supervision())
+        return self.y
 
     def summary(self) -> dict[str, Any]:
         info: dict[str, Any] = {
@@ -174,17 +148,14 @@ class Dataset:
             "n_features": len(self.features.columns),
             "stars": list(self.stars),
         }
-        if self.y is not None and self.accepted is not None:
+        if self.y is not None:
             info["n_positive"] = int(self.y.sum())
             info["n_negative"] = int((self.y == 0).sum())
-            info["n_accepted"] = int(self.accepted.sum())
-            info["n_accepted_positive"] = int((self.accepted & (self.y == 1)).sum())
-            info["n_accepted_negative"] = int((self.accepted & (self.y == 0)).sum())
-            info["n_rejected"] = int((~self.accepted).sum())
-            info["status_counts"] = {
-                str(k): int(v)
-                for k, v in pd.Series(self.status).value_counts().sort_index().items()
-            }
+            if self.status is not None:
+                info["status_counts"] = {
+                    str(k): int(v)
+                    for k, v in pd.Series(self.status).value_counts().sort_index().items()
+                }
         return info
 
 
@@ -315,7 +286,6 @@ def load_dataset(
     # -- supervision --------------------------------------------------------
     y: np.ndarray | None = None
     status: np.ndarray | None = None
-    accepted: np.ndarray | None = None
 
     has_label = schema.target_column in frame.columns
     has_status = schema.status_column in frame.columns
@@ -344,26 +314,15 @@ def load_dataset(
                 )
             else:
                 status = statuses.to_numpy(dtype=object)
-                accepted = (statuses == schema.accepted_status).to_numpy(dtype=bool)
 
     _fail(errors)
 
     if mode == "train":
-        assert y is not None and accepted is not None  # guaranteed by the checks above
+        assert y is not None  # guaranteed by the checks above
         if len(np.unique(y)) < 2:
             errors.append(
                 f"Training data contains only one class of {schema.target_column}. "
                 "Add stars covering both CONFIRMED and FALSE-POSITIVE candidates."
-            )
-        if not accepted.any():
-            errors.append(
-                f"No rows have {schema.status_column} == {schema.accepted_status!r}. "
-                "The meta-model and threshold are fitted on accepted candidates only."
-            )
-        elif len(np.unique(y[accepted])) < 2:
-            errors.append(
-                "Accepted candidates cover only one class. The meta-model and the "
-                "recall-constrained threshold both need accepted rows of both classes."
             )
         _fail(errors)
 
@@ -381,7 +340,6 @@ def load_dataset(
         file_checksums={p.name: _checksum(p) for p in files},
         y=y,
         status=status,
-        accepted=accepted,
     )
 
 

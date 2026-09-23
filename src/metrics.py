@@ -1,8 +1,7 @@
 """Threshold selection and the reported metric set.
 
-All metrics operate on *accepted* candidates only -- those are the rows whose
-labels the screening objective is defined over -- and are weighted so every star
-contributes equally, matching the fitting weights.
+Metrics are weighted so every star contributes equally, matching the fitting
+weights.
 """
 
 from __future__ import annotations
@@ -117,7 +116,7 @@ def select_threshold(
 # ---------------------------------------------------------------------------
 # Metric set
 # ---------------------------------------------------------------------------
-def accepted_average_precision(
+def safe_average_precision(
     y_true: np.ndarray,
     y_prob: np.ndarray,
     sample_weight: np.ndarray | None = None,
@@ -254,7 +253,7 @@ def per_star_summary(
         rows.append(
             {
                 "star_id": star,
-                "n_accepted": int(mask.sum()),
+                "n_candidates": int(mask.sum()),
                 "n_positive": int((y[mask] == 1).sum()),
                 "n_flagged": int(d[mask].sum()),
                 "tp": tp,

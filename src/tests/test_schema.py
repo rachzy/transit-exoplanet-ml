@@ -52,8 +52,6 @@ def test_target_and_status_are_mapped_not_modelled(schema):
     assert schema.target_column == "candidate_label"
     assert schema.status_column == "detection_status"
     assert schema.label_mapping == {"CONFIRMED": 1, "FALSE-POSITIVE": 0}
-    assert schema.accepted_status == "accepted"
-    assert schema.accepted_status in schema.valid_statuses
 
 
 def test_known_columns_cover_features_and_exclusions(schema):
@@ -79,13 +77,6 @@ def test_duplicate_feature_is_rejected(tmp_path, schema):
     payload = schema.to_dict()
     payload["feature_columns"].append(payload["feature_columns"][0])
     with pytest.raises(ConfigError, match="Duplicate entries"):
-        load_schema(_write(tmp_path, payload))
-
-
-def test_accepted_status_must_be_valid(tmp_path, schema):
-    payload = schema.to_dict()
-    payload["accepted_status"] = "not-a-status"
-    with pytest.raises(ConfigError, match="not in valid_statuses"):
         load_schema(_write(tmp_path, payload))
 
 

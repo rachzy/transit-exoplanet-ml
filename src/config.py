@@ -47,13 +47,6 @@ class Config:
         return bool(self.data["objective"].get("weighted_metrics", True))
 
     @property
-    def accepted_candidate_multiplier(self) -> float:
-        """Relative base-learner weight of accepted versus other candidates."""
-        return float(
-            self.data.get("weighting", {}).get("accepted_candidate_multiplier", 1.0)
-        )
-
-    @property
     def cv(self) -> dict[str, Any]:
         return self.data["cv"]
 
@@ -156,13 +149,6 @@ def _validate(config: Config) -> None:
     for key in ("seed", "objective", "selection", "cv", "models", "meta"):
         if key not in data:
             raise ConfigError(f"Config is missing required section {key!r}.")
-
-    multiplier = config.accepted_candidate_multiplier
-    if not math.isfinite(multiplier) or multiplier <= 0.0:
-        raise ConfigError(
-            "weighting.accepted_candidate_multiplier must be a positive finite "
-            f"number; got {multiplier}."
-        )
 
     if config.objective_metric not in SUPPORTED_METRICS:
         raise ConfigError(

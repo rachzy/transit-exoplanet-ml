@@ -108,17 +108,13 @@ def validate(
     _echo(f"  files / stars  : {summary['n_files']} / {summary['n_stars']}")
     _echo(f"  candidate rows : {summary['n_rows']}")
     _echo(f"  model features : {summary['n_features']}")
-    if "n_accepted" in summary:
+    if "n_positive" in summary:
         _echo(
             f"  labels         : {summary['n_positive']} CONFIRMED / "
             f"{summary['n_negative']} FALSE-POSITIVE"
         )
-        _echo(
-            f"  accepted       : {summary['n_accepted']} "
-            f"({summary['n_accepted_positive']} CONFIRMED / "
-            f"{summary['n_accepted_negative']} FALSE-POSITIVE)"
-        )
-        _echo(f"  status counts  : {summary['status_counts']}")
+        if "status_counts" in summary:
+            _echo(f"  status counts  : {summary['status_counts']}")
 
 
 @app.command()
