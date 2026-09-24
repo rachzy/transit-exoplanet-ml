@@ -115,6 +115,13 @@ def validate(
         )
         if "status_counts" in summary:
             _echo(f"  status counts  : {summary['status_counts']}")
+    if "n_unreliable" in summary:
+        _echo(
+            f"  reliability    : {summary['n_unreliable']} unreliable of "
+            f"{summary['n_rows']} rows ({summary.get('n_unreliable_positive', 0)} "
+            f"unreliable positives), {summary['n_unscoreable']} unscoreable "
+            "(missing signal)"
+        )
 
 
 @app.command()
@@ -150,6 +157,7 @@ def evaluate(
         f"{result.dataset_summary['n_stars']} stars, "
         f"{result.dataset_summary['n_rows']} candidates."
     )
+    _report_unreliable_rows(dataset.summary(), resolved)
     metric = resolved.selection["metric"]
     scores = result.selection_scores(metric)
     would_ship = result.would_ship()
@@ -190,6 +198,25 @@ def evaluate(
     _report_selection_bias(margin, len(resolved.selection_candidates))
 
     _echo(f"\nWrote {len(written)} files to {written[0].parent}")
+
+
+def _report_unreliable_rows(summary: dict, config) -> None:
+    """Warn how many rows the meta stage and reported metrics never see."""
+    n_unreliable = summary.get("n_unreliable", 0)
+    if not n_unreliable:
+        return
+    scope = (
+        "excluded from meta-model fitting, threshold selection, and reported metrics"
+        if config.exclude_unreliable_from_threshold
+        else "kept in (exclude_unreliable_from_threshold is false)"
+    )
+    typer.secho(
+        f"NOTE: {n_unreliable} of {summary['n_rows']} candidates are unreliable -- below "
+        f"the pipeline's own signal threshold ({summary.get('n_unreliable_positive', 0)} "
+        f"of them CONFIRMED) -- and are {scope}. {summary['n_unscoreable']} of those have "
+        "no signal statistic at all.",
+        fg=typer.colors.YELLOW,
+    )
 
 
 def _report_selection_bias(margin: float | None, n_candidates: int) -> None:

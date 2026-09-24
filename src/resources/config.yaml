@@ -5,6 +5,11 @@ objective:
   metric: average_precision
   min_recall: 0.95
   weighted_metrics: true
+  # Rows below the pipeline's own signal-reliability threshold (schema:
+  # signal_column vs. signal_threshold_column) still train base learners, but
+  # are excluded from meta-model fitting, threshold selection, and reported
+  # evaluation metrics.
+  exclude_unreliable_from_threshold: true
 
 selection:
   strategy: best

@@ -54,6 +54,11 @@ def test_target_and_status_are_mapped_not_modelled(schema):
     assert schema.label_mapping == {"CONFIRMED": 1, "FALSE-POSITIVE": 0}
 
 
+def test_reliability_columns_are_declared(schema):
+    assert schema.signal_column == "MES"
+    assert schema.signal_threshold_column == "mes_threshold_used"
+
+
 def test_known_columns_cover_features_and_exclusions(schema):
     known = set(schema.known_columns)
     assert known == set(schema.feature_columns) | set(schema.withheld_columns)
@@ -90,3 +95,17 @@ def test_label_mapping_must_be_binary(tmp_path, schema):
 def test_missing_schema_file(tmp_path):
     with pytest.raises(ConfigError, match="not found"):
         load_schema(tmp_path / "nope.yaml")
+
+
+def test_signal_column_must_be_a_known_column(tmp_path, schema):
+    payload = schema.to_dict()
+    payload["signal_column"] = "not_a_real_column"
+    with pytest.raises(ConfigError, match="signal_column"):
+        load_schema(_write(tmp_path, payload))
+
+
+def test_signal_threshold_column_must_be_a_known_column(tmp_path, schema):
+    payload = schema.to_dict()
+    payload["signal_threshold_column"] = "not_a_real_column"
+    with pytest.raises(ConfigError, match="signal_threshold_column"):
+        load_schema(_write(tmp_path, payload))

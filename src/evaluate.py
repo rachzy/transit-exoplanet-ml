@@ -213,28 +213,30 @@ def _permutation_importance(
     result,
     X: np.ndarray,
     y: np.ndarray,
+    reliable: np.ndarray,
     groups: np.ndarray,
     feature_names: tuple[str, ...],
     config: Config,
     fold: int,
 ) -> list[dict[str, Any]]:
-    """Feature importance measured only on this fold's held-out stars."""
+    """Feature importance measured only on this fold's reliable held-out rows."""
     settings = config.permutation_importance
     n_repeats = int(settings.get("n_repeats", 10))
-    if y.size == 0 or np.unique(y).size < 2:
+    rows = np.flatnonzero(reliable)
+    if rows.size == 0 or np.unique(y[rows]).size < 2:
         return []
 
-    weights = star_balanced_weights(groups) if config.weighted_metrics else None
+    weights = star_balanced_weights(groups[rows]) if config.weighted_metrics else None
 
     def score(matrix: np.ndarray) -> dict[str, float]:
-        """AP for every candidate model.
+        """Reliable-row AP for every candidate model.
 
         All six share one pass of base-learner predictions, so scoring them
         together costs little more than scoring one.
         """
         probabilities = result.stack.all_probabilities(matrix)
         return {
-            model: safe_average_precision(y, values, sample_weight=weights)
+            model: safe_average_precision(y[rows], values[rows], sample_weight=weights)
             for model, values in probabilities.items()
         }
 
@@ -282,6 +284,11 @@ def evaluate_dataset(
     X = dataset.X
     groups = dataset.star_id
     feature_names = dataset.feature_names
+    reliable = (
+        dataset.reliable
+        if config.exclude_unreliable_from_threshold and dataset.reliable is not None
+        else np.ones(len(dataset), dtype=bool)
+    )
 
     cv = config.cv
     n_outer = resolve_n_splits(
@@ -317,12 +324,14 @@ def evaluate_dataset(
             config,
             feature_names,
             progress=progress,
+            reliable=reliable[train_idx],
         )
         inner_folds_per_outer.append(result.n_inner_folds)
         fold_best_params.append({"outer_fold": fold, "best_params": result.best_params})
 
         probabilities = model_probabilities(result, X[val_idx])
-        val_rows = val_idx
+        reliable_val = np.flatnonzero(reliable[val_idx])
+        val_rows = val_idx[reliable_val]
         weights = (
             star_balanced_weights(groups[val_rows]) if config.weighted_metrics else None
         )
@@ -340,7 +349,7 @@ def evaluate_dataset(
         for name in models:
             threshold = result.thresholds[name].threshold
             fold_thresholds[name].append(float(threshold))
-            probability = probabilities[name]
+            probability = probabilities[name][reliable_val]
             block[f"prob_{name}"] = probability
             block[f"threshold_{name}"] = threshold
             if val_rows.size and np.unique(y[val_rows]).size >= 1:
@@ -358,6 +367,7 @@ def evaluate_dataset(
                 result,
                 X[val_idx],
                 y[val_idx],
+                reliable[val_idx],
                 groups[val_idx],
                 feature_names,
                 config,

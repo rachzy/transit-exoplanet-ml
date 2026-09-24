@@ -78,6 +78,17 @@ def test_validate_rejects_unlabelled_data_in_train_mode(predict_dir):
     assert "detection_status" in result.stderr
 
 
+def test_validate_reports_reliability_counts(train_dir, schema):
+    from src.data import load_dataset
+
+    dataset = load_dataset(train_dir, mode="train", schema=schema)
+    result = run("validate", "--data-dir", str(train_dir), "--mode", "train")
+
+    assert result.exit_code == 0
+    assert "unreliable" in result.stdout.lower()
+    assert str(int((~dataset.reliable).sum())) in result.stdout
+
+
 # ---------------------------------------------------------------------------
 # evaluate / train / predict
 # ---------------------------------------------------------------------------
@@ -123,6 +134,19 @@ def test_evaluate_writes_metrics_and_plots(evaluate_output):
         "roc.png",
         "score_separation.png",
     ]
+
+
+def test_evaluate_warns_about_unreliable_rows(train_dir, config_file, tmp_path_factory):
+    output = tmp_path_factory.mktemp("cli-eval-warn") / "report"
+    result = run(
+        "evaluate",
+        "--data-dir", str(train_dir),
+        "--output-dir", str(output),
+        "--config", str(config_file),
+        "--quiet",
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "unreliable" in result.stdout.lower()
 
 
 def test_evaluate_metrics_are_readable(evaluate_output):

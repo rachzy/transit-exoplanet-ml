@@ -99,7 +99,12 @@ class SelectionRecord:
                 )
             )
         ]
-        return sorted(usable, key=lambda item: -item[1])
+        order = list(self.candidates)
+
+        def tie_break(name: str) -> int:
+            return order.index(name) if name in order else len(order)
+
+        return sorted(usable, key=lambda item: (-item[1], tie_break(item[0])))
 
     @property
     def runner_up(self) -> str | None:
@@ -272,12 +277,14 @@ def _training_oof_frame(fit: StackFitResult, dataset: Dataset) -> pd.DataFrame:
     """Cross-fitted training predictions, one row per candidate."""
     y = dataset.require_supervision()
     probabilities = fit.training_probabilities()
+    reliable = dataset.reliable
     frame = pd.DataFrame(
         {
             "source_file": dataset.source_file,
             "star_id": dataset.star_id,
             "row_index": dataset.row_index,
             "detection_status": dataset.status,
+            "reliable": reliable,
             "y_true": y,
         }
     )
@@ -289,8 +296,8 @@ def _training_oof_frame(fit: StackFitResult, dataset: Dataset) -> pd.DataFrame:
     frame["model_name"] = selected
     frame["potential_probability"] = probabilities[selected]
     frame["decision_threshold"] = fit.threshold
-    flagged = probabilities[selected] >= fit.threshold
-    frame["prediction"] = np.where(flagged, POTENTIAL, UNLIKELY)
+    flagged = reliable & (probabilities[selected] >= fit.threshold)
+    frame["prediction"] = np.where(~reliable, "", np.where(flagged, POTENTIAL, UNLIKELY))
     return frame.sort_values(["source_file", "row_index"], kind="stable").reset_index(drop=True)
 
 
@@ -459,6 +466,7 @@ def train_model(
         dataset.feature_names,
         n_inner_splits=n_folds,
         progress=progress,
+        reliable=dataset.reliable,
     )
 
     selection = choose_model(config, fit, dataset, evaluation)

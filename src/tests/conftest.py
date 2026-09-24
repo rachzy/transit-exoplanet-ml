@@ -81,7 +81,10 @@ def build_synthetic_frame(
     frame["snr_per_transit_mean"] = frame["SES_mean"]
     frame["snr_per_transit_std"] = frame["SES_std"]
     frame["planet_radius_rjup"] = frame["planet_radius_rearth"] / 11.209
-    frame["mes_threshold_used"] = 7.1
+    # A threshold that most CONFIRMED rows clear and most FALSE-POSITIVE rows
+    # don't, so the fixture carries a real mix of reliable/unreliable rows
+    # without disturbing the signal-vs-label correlation other tests rely on.
+    frame[schema.signal_threshold_column] = positive * 1.0 + 0.4
     frame["is_provisional_detection"] = [
         1.0 if status == "provisional" else 0.0 for status in statuses
     ]
@@ -94,6 +97,10 @@ def build_synthetic_frame(
     frame["matched_period_ratio"] = [
         "direct" if label == "CONFIRMED" else None for label in labels
     ]
+    if star_index == 0:
+        # One row with no signal statistic at all: the pipeline's detection
+        # step never completed for it, distinct from "weak but present".
+        frame.loc[frame.index[-1], schema.signal_column] = np.nan
     return frame.loc[:, list(schema.known_columns)]
 
 

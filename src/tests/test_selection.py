@@ -79,6 +79,18 @@ def test_invalid_selection_config_is_rejected(patch, match):
         load_config().with_overrides({"selection": patch})
 
 
+def test_unreliable_rows_are_excluded_from_the_threshold_by_default():
+    config = load_config()
+    assert config.exclude_unreliable_from_threshold is True
+
+
+def test_excluding_unreliable_rows_from_the_threshold_can_be_disabled():
+    config = load_config().with_overrides(
+        {"objective": {"exclude_unreliable_from_threshold": False}}
+    )
+    assert config.exclude_unreliable_from_threshold is False
+
+
 # ---------------------------------------------------------------------------
 # End-to-end selection
 # ---------------------------------------------------------------------------
@@ -134,6 +146,21 @@ def test_selecting_an_unfitted_model_is_rejected(dataset, fast_config):
     run = train_model(dataset=dataset, config=fast_config, run_evaluation=False)
     with pytest.raises(ValueError, match="No threshold for selected model"):
         run.bundle.stack.with_selection("random_forest")
+
+
+def test_ranked_breaks_ties_the_same_way_select_best_model_does():
+    """A tied score must not make ranked[0] disagree with selected_model."""
+    from src.training import SelectionRecord
+
+    record = SelectionRecord(
+        selected_model="lightgbm",
+        strategy="best",
+        metric="average_precision",
+        score_source="crossfit",
+        scores={STACK: 0.5, "extra_trees": 0.9, "lightgbm": 0.9, "catboost": 0.1},
+        candidates=(STACK, "lightgbm", "catboost", "extra_trees"),
+    )
+    assert record.ranked[0][0] == record.selected_model == "lightgbm"
 
 
 def test_selection_record_reports_the_runner_up_and_margin(dataset, fast_config):

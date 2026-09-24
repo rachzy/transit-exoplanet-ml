@@ -23,6 +23,8 @@ class FeatureSchema:
     status_column: str
     label_mapping: dict[str, int]
     valid_statuses: tuple[str, ...]
+    signal_column: str
+    signal_threshold_column: str
     feature_columns: tuple[str, ...]
     excluded_columns: dict[str, tuple[str, ...]]
     required_columns: dict[str, tuple[str, ...]]
@@ -58,6 +60,8 @@ class FeatureSchema:
             "status_column": self.status_column,
             "label_mapping": dict(self.label_mapping),
             "valid_statuses": list(self.valid_statuses),
+            "signal_column": self.signal_column,
+            "signal_threshold_column": self.signal_threshold_column,
             "feature_columns": list(self.feature_columns),
             "excluded_columns": {k: list(v) for k, v in self.excluded_columns.items()},
             "required_columns": {k: list(v) for k, v in self.required_columns.items()},
@@ -93,6 +97,8 @@ def load_schema(path: str | Path | None = None) -> FeatureSchema:
             status_column=str(data["status_column"]),
             label_mapping={str(k): int(v) for k, v in data["label_mapping"].items()},
             valid_statuses=tuple(str(s) for s in data["valid_statuses"]),
+            signal_column=str(data["signal_column"]),
+            signal_threshold_column=str(data["signal_threshold_column"]),
             feature_columns=tuple(str(c) for c in data["feature_columns"]),
             excluded_columns={
                 str(k): tuple(str(c) for c in v)
@@ -127,6 +133,16 @@ def _check_schema_consistency(schema: FeatureSchema) -> None:
         raise ConfigError("label_mapping must map onto exactly the values {0, 1}.")
 
     known = set(schema.known_columns)
+    if schema.signal_column not in known:
+        raise ConfigError(
+            f"signal_column {schema.signal_column!r} is not a known column."
+        )
+    if schema.signal_threshold_column not in known:
+        raise ConfigError(
+            f"signal_threshold_column {schema.signal_threshold_column!r} is not a "
+            "known column."
+        )
+
     for mode, required in schema.required_columns.items():
         missing = [c for c in required if c not in known]
         if missing:

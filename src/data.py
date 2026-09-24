@@ -113,6 +113,7 @@ class Dataset:
     file_checksums: dict[str, str]
     y: np.ndarray | None = None
     status: np.ndarray | None = None
+    reliable: np.ndarray | None = None
 
     def __len__(self) -> int:
         return len(self.frame)
@@ -156,6 +157,14 @@ class Dataset:
                     str(k): int(v)
                     for k, v in pd.Series(self.status).value_counts().sort_index().items()
                 }
+        if self.reliable is not None:
+            unreliable = ~self.reliable
+            info["n_unreliable"] = int(unreliable.sum())
+            info["n_unscoreable"] = int(
+                self.features[self.schema.signal_column].isna().sum()
+            )
+            if self.y is not None:
+                info["n_unreliable_positive"] = int((unreliable & (self.y == 1)).sum())
         return info
 
 
@@ -315,6 +324,13 @@ def load_dataset(
             else:
                 status = statuses.to_numpy(dtype=object)
 
+    # -- reliability ----------------------------------------------------------
+    reliable: np.ndarray | None = None
+    if schema.signal_threshold_column in frame.columns:
+        threshold = pd.to_numeric(frame[schema.signal_threshold_column], errors="coerce")
+        signal = features[schema.signal_column]
+        reliable = ((signal >= threshold) & signal.notna() & threshold.notna()).to_numpy()
+
     _fail(errors)
 
     if mode == "train":
@@ -340,6 +356,7 @@ def load_dataset(
         file_checksums={p.name: _checksum(p) for p in files},
         y=y,
         status=status,
+        reliable=reliable,
     )
 
 

@@ -47,6 +47,14 @@ class Config:
         return bool(self.data["objective"].get("weighted_metrics", True))
 
     @property
+    def exclude_unreliable_from_threshold(self) -> bool:
+        """Whether rows below the signal reliability threshold are kept out of
+        meta-model fitting, threshold selection, and reported metrics."""
+        return bool(
+            self.data["objective"].get("exclude_unreliable_from_threshold", True)
+        )
+
+    @property
     def cv(self) -> dict[str, Any]:
         return self.data["cv"]
 

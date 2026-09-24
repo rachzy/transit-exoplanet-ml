@@ -305,6 +305,89 @@ def test_meta_training_inputs_are_invariant_to_held_out_data(
         np.testing.assert_array_equal(original.val_probabilities, changed.val_probabilities)
 
 
+# ---------------------------------------------------------------------------
+# Reliability gating (unreliable rows still train bases, not the meta stage)
+# ---------------------------------------------------------------------------
+def test_meta_model_and_threshold_exclude_unreliable_rows_but_bases_keep_them(
+    dataset, fast_config, monkeypatch
+):
+    y = dataset.require_supervision()
+    reliable = dataset.reliable
+    n_total = len(dataset)
+    n_reliable = int(reliable.sum())
+    assert 0 < n_reliable < n_total, "fixture must mix reliable and unreliable rows"
+
+    base_fit_sizes: list[int] = []
+    meta_fit_sizes: list[int] = []
+    threshold_sizes: list[int] = []
+
+    real_fit_base = stacking.fit_base
+    real_fit_meta = stacking.fit_meta
+    real_select = stacking.select_threshold
+
+    def spy_fit_base(learner, params, X, y_, groups, config):
+        base_fit_sizes.append(len(y_))
+        return real_fit_base(learner, params, X, y_, groups, config)
+
+    def spy_fit_meta(P, y_, groups, config, params=None):
+        meta_fit_sizes.append(len(y_))
+        return real_fit_meta(P, y_, groups, config, params)
+
+    def spy_select(y_, prob, min_recall, sample_weight=None):
+        threshold_sizes.append(len(y_))
+        return real_select(y_, prob, min_recall, sample_weight=sample_weight)
+
+    monkeypatch.setattr(stacking, "fit_base", spy_fit_base)
+    monkeypatch.setattr(stacking, "fit_meta", spy_fit_meta)
+    monkeypatch.setattr(stacking, "select_threshold", spy_select)
+
+    fit_stack(
+        dataset.X,
+        y,
+        dataset.star_id,
+        fast_config,
+        dataset.feature_names,
+        reliable=reliable,
+    )
+
+    assert n_total in base_fit_sizes, "bases must still be fit on every row"
+    assert meta_fit_sizes, "the meta-model must be fitted"
+    assert all(size <= n_reliable for size in meta_fit_sizes)
+    assert n_reliable in meta_fit_sizes, "the final meta refit uses every reliable row"
+    assert threshold_sizes
+    assert all(size <= n_reliable for size in threshold_sizes)
+
+
+def test_exclude_unreliable_from_threshold_flag_disables_filtering(
+    dataset, fast_config, monkeypatch
+):
+    y = dataset.require_supervision()
+    reliable = dataset.reliable
+    disabled = fast_config.with_overrides(
+        {"objective": {"exclude_unreliable_from_threshold": False}}
+    )
+
+    meta_fit_sizes: list[int] = []
+    real_fit_meta = stacking.fit_meta
+
+    def spy_fit_meta(P, y_, groups, config, params=None):
+        meta_fit_sizes.append(len(y_))
+        return real_fit_meta(P, y_, groups, config, params)
+
+    monkeypatch.setattr(stacking, "fit_meta", spy_fit_meta)
+
+    fit_stack(
+        dataset.X,
+        y,
+        dataset.star_id,
+        disabled,
+        dataset.feature_names,
+        reliable=reliable,
+    )
+
+    assert len(dataset) in meta_fit_sizes, "the flag must let unreliable rows back in"
+
+
 def test_meta_input_isolation_reports_insufficient_nested_star_support(fast_config):
     X = np.arange(8, dtype=float).reshape(4, 2)
     y = np.array([0, 1, 0, 1])

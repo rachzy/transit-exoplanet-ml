@@ -193,6 +193,44 @@ def test_every_row_is_labelled_regardless_of_detection_status(train_dir, schema)
 
 
 # ---------------------------------------------------------------------------
+# Reliability (signal strength vs. the pipeline's own detection threshold)
+# ---------------------------------------------------------------------------
+def test_reliable_flags_rows_meeting_the_signal_threshold(train_dir, schema):
+    dataset = load_dataset(train_dir, mode="train", schema=schema)
+    signal = dataset.frame[schema.signal_column]
+    threshold = dataset.frame[schema.signal_threshold_column]
+    expected = ((signal >= threshold) & signal.notna() & threshold.notna()).to_numpy()
+
+    assert dataset.reliable.dtype == np.bool_
+    assert np.array_equal(dataset.reliable, expected)
+    assert dataset.reliable.sum() > 0, "fixture should contain reliable rows"
+    assert (~dataset.reliable).sum() > 0, "fixture should contain unreliable rows"
+
+
+def test_nan_signal_rows_are_unreliable(train_dir, schema):
+    dataset = load_dataset(train_dir, mode="train", schema=schema)
+    nan_signal = dataset.frame[schema.signal_column].isna().to_numpy()
+    assert nan_signal.any(), "fixture should contain a missing-signal row"
+    assert not dataset.reliable[nan_signal].any()
+
+
+def test_summary_reports_reliability_counts(train_dir, schema):
+    dataset = load_dataset(train_dir, mode="train", schema=schema)
+    summary = dataset.summary()
+    assert summary["n_unreliable"] == int((~dataset.reliable).sum())
+    assert summary["n_unreliable_positive"] == int(
+        ((~dataset.reliable) & (dataset.y == 1)).sum()
+    )
+    assert summary["n_unscoreable"] == int(
+        dataset.frame[schema.signal_column].isna().sum()
+    )
+    assert summary["n_unreliable"] > 0
+    assert summary["n_unreliable_positive"] > 0, (
+        "fixture should contain a weak-signal true positive"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Weights
 # ---------------------------------------------------------------------------
 def test_every_star_carries_the_same_total_weight(train_dir, schema):

@@ -335,8 +335,16 @@ def tune_meta_learner(
     groups: np.ndarray,
     config: Config,
     progress: Progress = None,
+    reliable: np.ndarray | None = None,
 ) -> TuningResult:
-    """Tune C using independently constructed inputs for each meta fold."""
+    """Tune C using independently constructed inputs for each meta fold.
+
+    ``reliable`` restricts the rows the meta-model is trained and scored on to
+    those meeting the schema's signal-reliability threshold; base learners
+    upstream still see every row. ``None`` means every row is usable.
+    """
+    if reliable is None:
+        reliable = np.ones(y.shape[0], dtype=bool)
     grid = meta_candidate_params(config)
     weighted = config.weighted_metrics
     records: list[dict[str, Any]] = []
@@ -345,23 +353,26 @@ def tune_meta_learner(
         scores: list[float] = []
         for fold in folds:
             tr, va = fold.train_rows, fold.val_rows
-            if tr.size == 0 or va.size == 0:
+            train_rows = tr[reliable[tr]]
+            val_rows = va[reliable[va]]
+            if train_rows.size == 0 or val_rows.size == 0:
                 scores.append(float("nan"))
                 continue
-            if np.unique(y[tr]).size < 2:
+            if np.unique(y[train_rows]).size < 2:
                 scores.append(float("nan"))
                 continue
             meta = fit_meta(
-                fold.train_probabilities, y[tr], groups[tr], config, params
+                fold.train_probabilities[reliable[tr]],
+                y[train_rows], groups[train_rows], config, params,
             )
             probability = np.asarray(
-                meta.predict_proba(fold.val_probabilities)
+                meta.predict_proba(fold.val_probabilities[reliable[va]])
             )[:, 1]
             scores.append(
                 _score_fold(
-                    y[va],
+                    y[val_rows],
                     probability,
-                    groups[va],
+                    groups[val_rows],
                     config.objective_metric,
                     config.min_recall,
                     weighted,
@@ -486,25 +497,32 @@ def crossfit_meta_predictions(
     groups: np.ndarray,
     config: Config,
     params: dict[str, Any] | None = None,
+    reliable: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Cross-fitted meta probabilities for every row.
+    """Cross-fitted meta probabilities for every reliable row; NaN elsewhere.
 
     Each meta fit uses inputs prepared without its validation stars. The caller
     supplies C selected by tuning over these folds; this does not add another
-    level of cross-validation for hyperparameter selection itself.
+    level of cross-validation for hyperparameter selection itself. ``reliable``
+    restricts which rows are fitted/predicted, as in :func:`tune_meta_learner`.
     """
+    if reliable is None:
+        reliable = np.ones(y.shape[0], dtype=bool)
     predictions = np.full(y.shape[0], np.nan, dtype=float)
     for fold in folds:
         tr, va = fold.train_rows, fold.val_rows
-        if va.size == 0:
+        train_rows = tr[reliable[tr]]
+        val_rows = va[reliable[va]]
+        if val_rows.size == 0:
             continue
-        if tr.size == 0 or np.unique(y[tr]).size < 2:
+        if train_rows.size == 0 or np.unique(y[train_rows]).size < 2:
             continue
         meta = fit_meta(
-            fold.train_probabilities, y[tr], groups[tr], config, params,
+            fold.train_probabilities[reliable[tr]],
+            y[train_rows], groups[train_rows], config, params,
         )
-        predictions[va] = np.asarray(
-            meta.predict_proba(fold.val_probabilities)
+        predictions[val_rows] = np.asarray(
+            meta.predict_proba(fold.val_probabilities[reliable[va]])
         )[:, 1]
     return predictions
 
@@ -597,6 +615,7 @@ def fit_stack(
     feature_names: Sequence[str],
     n_inner_splits: int | None = None,
     progress: Progress = None,
+    reliable: np.ndarray | None = None,
 ) -> StackFitResult:
     """Tune, cross-fit, and assemble the stack on one training set.
 
@@ -605,7 +624,15 @@ def fit_stack(
     each meta-training partition; tune and cross-fit the meta-model with those
     isolated inputs; choose the recall-floor threshold; then refit the
     meta-model and the bases on every row.
+
+    ``reliable`` flags rows meeting the schema's signal-reliability threshold.
+    Base learners are always fit on every row. When
+    ``config.exclude_unreliable_from_threshold`` is true (the default) and
+    ``reliable`` is given, the meta-model and every model's threshold are
+    instead fit and chosen using only reliable rows.
     """
+    if reliable is None or not config.exclude_unreliable_from_threshold:
+        reliable = np.ones(y.shape[0], dtype=bool)
     cv = config.cv
     n_splits = n_inner_splits or resolve_n_splits(
         y, groups, int(cv["inner_folds"]), int(cv["min_inner_folds"]), "inner"
@@ -627,19 +654,25 @@ def fit_stack(
 
     report_progress(progress, "  tuning the meta-model")
     tuning["meta"] = tune_meta_learner(
-        meta_folds, y, groups, config, progress
+        meta_folds, y, groups, config, progress, reliable=reliable
     )
     best_params["meta"] = tuning["meta"].best_params
 
     report_progress(progress, "  cross-fitting the meta-model")
     meta_crossfit = crossfit_meta_predictions(
-        meta_folds, y, groups, config, best_params["meta"]
+        meta_folds, y, groups, config, best_params["meta"], reliable=reliable
     )
 
-    thresholds = _choose_thresholds(base_oof, meta_crossfit, y, groups, config)
+    thresholds = _choose_thresholds(
+        base_oof, meta_crossfit, y, groups, config, reliable=reliable
+    )
 
     report_progress(progress, "  refitting base learners and meta-model on the full training set")
-    meta = fit_meta(base_oof, y, groups, config, best_params["meta"])
+    reliable_rows = np.flatnonzero(reliable)
+    meta = fit_meta(
+        base_oof[reliable_rows], y[reliable_rows], groups[reliable_rows], config,
+        best_params["meta"],
+    )
     bases = {
         learner: fit_base(learner, best_params[learner], X, y, groups, config)
         for learner in config.base_learners
@@ -672,14 +705,17 @@ def _choose_thresholds(
     y: np.ndarray,
     groups: np.ndarray,
     config: Config,
+    reliable: np.ndarray | None = None,
 ) -> dict[str, ThresholdChoice]:
-    """One recall-constrained threshold per model, from training rows only."""
-    rows = np.flatnonzero(~np.isnan(meta_crossfit))
+    """One recall-constrained threshold per model, from reliable training rows."""
+    if reliable is None:
+        reliable = np.ones(y.shape[0], dtype=bool)
+    rows = np.flatnonzero(reliable & ~np.isnan(meta_crossfit))
     if rows.size == 0 or np.unique(y[rows]).size < 2:
         raise DataDiversityError(
-            "No cross-fitted candidates of both classes were available for "
-            "threshold selection. Add stars with CONFIRMED and FALSE-POSITIVE "
-            "candidates."
+            "No reliable, cross-fitted candidates of both classes were available "
+            "for threshold selection. Add stars with CONFIRMED and FALSE-POSITIVE "
+            "candidates meeting the signal-reliability threshold."
         )
     weights = star_balanced_weights(groups[rows]) if config.weighted_metrics else None
 
